@@ -137,24 +137,33 @@ def _build_metadata(slide, outline: BookOutline) -> None:
         size = Pt(FONT_SIZE_META_HEAD if head else FONT_SIZE_META_BODY)
         _set_run(_ensure_run(p), text, size, BLACK)
 
-    line(f"Level: {_clean_num(outline.level)}", head=True)
+    line(f"Level: {_clean_num(outline.level) or 'Smart'}", head=True)
     line(f"Book: {_clean_num(outline.book_number)}", head=True)
     line(f"CEFR: {outline.cefr or '-'}", head=True)
     line(f"Lexile: {outline.lexile or '-'}", head=True)
     line(f"Word count: {outline.total_words}", head=True)
+    if outline.phonics:
+        line(f"Phonics: {outline.phonics}", head=True)
+    if outline.grammar_focus:
+        line(f"Grammar: {outline.grammar_focus}", head=True)
+    if outline.reader_type:
+        line(f"Reader Type: {outline.reader_type}", head=True)
     line("Vocabulary:", head=True)
 
-    try:
-        level_num = int(_clean_num(outline.level) or "0")
-    except ValueError:
-        level_num = 0
-    if level_num >= 3:
-        line(", ".join(outline.vocabulary_mastery) or "-", head=False, indent=1)
-    elif outline.has_double_vocab:
-        line(f"Mastery: {', '.join(outline.vocabulary_mastery) or '-'}", head=False, indent=1)
-        line(f"Exposure: {', '.join(outline.vocabulary_exposure) or '-'}", head=False, indent=1)
+    # L0/L1/L2/Smart → 双行 Mastery + Exposure（每行 3-4 词）
+    # L3-L6        → 单行 Vocabulary 4 词（lemma 原型）
+    if outline.is_dual_vocab_level:
+        if outline.has_double_vocab:
+            line(f"Mastery:  {', '.join(outline.vocabulary_mastery) or '-'}",
+                 head=False, indent=1)
+            line(f"Exposure: {', '.join(outline.vocabulary_exposure) or '-'}",
+                 head=False, indent=1)
+        else:
+            line(", ".join(outline.vocabulary_for_display) or "-",
+                 head=False, indent=1)
     else:
-        line(", ".join(outline.vocabulary_for_display) or "-", head=False, indent=1)
+        words = outline.vocabulary_for_display[:4]
+        line(", ".join(words) or "-", head=False, indent=1)
 
 
 # ---------- 通用 ----------

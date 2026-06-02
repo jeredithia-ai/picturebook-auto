@@ -1,23 +1,32 @@
-"""即梦 4.6 (火山方舟 Seedream) 图片生成客户端 + 占位图。
+"""gpt-image-2（imarouter 托管）图片生成客户端 + 占位图。
 
-API: POST {base_url}/images/generations
-Auth: Bearer {ARK_API_KEY}
-Body: { model, prompt, size, response_format, watermark, image?(ref) }
+2026-06-02 迁移：从火山 Seedream（同步）换到 imarouter gpt-image-2（异步任务制）。
+
+生成链路：
+  1. POST {base}/images/generations  →  返回 task_id
+  2. 轮询 GET {base}/images/generations/{task_id}  →  data.status == "succeeded"
+  3. 下载 data.url（阿里云 OSS 临时直链）写入 dest
+
+参考图（锁 IP 形象 / 图生图）：
+  - gpt-image-2 只接受 **单个 image URL**（base64 / 多图都不支持）
+  - 本地参考图需先托管成公网 URL（临时图床即可，生成时只拉取一次）
+  - 已是 URL 的参考（如上一轮输出 OSS url，做链式图生图）直接用
 """
 from __future__ import annotations
 
-import base64
 import json
 import time
 from pathlib import Path
 from typing import Iterable
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from config import (
+    IMAGE_HOST_PROVIDER,
+    IMAGE_POLL_INTERVAL,
+    IMAGE_POLL_MAX_TRIES,
     IMAGE_SIZE,
-    IMAGE_WATERMARK,
     JIMENG_API_KEY,
     JIMENG_BASE_URL,
     JIMENG_MODEL,
@@ -25,21 +34,106 @@ from config import (
     REQUEST_TIMEOUT,
 )
 
+_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) picturebook-auto/1.0"}
 
+
+# ============================================================
+#  图片托管：本地图 → 公网 URL（gpt-image-2 参考图只收 URL）
+# ============================================================
+def host_image_to_url(path: Path) -> str | None:
+    """把本地图片上传到临时图床，返回公网直链。失败返回 None。
+
+    参考图只需在生成的几秒内可访问，临时图床（tmpfiles 24h）足够。
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+
+    provider = IMAGE_HOST_PROVIDER.lower()
+
+    if provider in ("tmpfiles", "auto"):
+        try:
+            with path.open("rb") as f:
+                r = requests.post(
+                    "https://tmpfiles.org/api/v1/upload",
+                    headers=_UA, files={"file": (path.name, f)}, timeout=120,
+                )
+            if r.status_code == 200:
+                u = r.json().get("data", {}).get("url", "")
+                if u:
+                    # 直链：tmpfiles.org/xxx → tmpfiles.org/dl/xxx
+                    return u.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+        except Exception:
+            pass
+
+    # 兜底：litterbox（catbox 临时版，72h）
+    try:
+        with path.open("rb") as f:
+            r = requests.post(
+                "https://litterbox.catbox.moe/resources/internals/api.php",
+                data={"reqtype": "fileupload", "time": "72h"},
+                files={"fileToUpload": (path.name, f)},
+                headers=_UA, timeout=120,
+            )
+        if r.status_code == 200 and r.text.startswith("http"):
+            return r.text.strip()
+    except Exception:
+        pass
+
+    return None
+
+
+def _resolve_reference_url(references: Iterable[Path | str]) -> str | None:
+    """从参考列表里取第一个可用的 URL。
+
+    - 元素是 http(s) URL → 直接用（链式图生图：上一轮输出）
+    - 元素是本地 Path → 托管成 URL
+    gpt-image-2 只能用一张参考图。
+    """
+    for ref in references:
+        if not ref:
+            continue
+        s = str(ref)
+        if s.startswith("http://") or s.startswith("https://"):
+            return s
+        p = Path(s)
+        if p.exists():
+            url = host_image_to_url(p)
+            if url:
+                return url
+    return None
+
+
+# ============================================================
+#  gpt-image-2 异步生图
+# ============================================================
 def generate_image(
     *,
     prompt: str,
     dest: Path,
-    references: Iterable[Path] = (),
+    references: Iterable[Path | str] = (),
     mock: bool = False,
     label: str = "",
+    seed: int | None = None,  # gpt-image-2 不支持 seed，签名保留兼容
+    size: str | None = None,
+    reference_url: str | None = None,
 ) -> Path:
-    """生成单张图，写入 dest。失败抛异常。"""
+    """生成单张图写入 dest。失败抛异常。
+
+    Args:
+        references: 参考图列表（本地 Path 或 URL），仅用第一个（gpt-image-2 单图）。
+        reference_url: 直接指定参考 URL（优先于 references），链式图生图用。
+        size: 覆盖默认 IMAGE_SIZE（如封面想用别的比例）。
+    """
+    dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     if mock or not JIMENG_API_KEY:
         _save_mock_image(dest, prompt, label)
         return dest
+
+    img_size = size or IMAGE_SIZE
+    ref_url = reference_url or _resolve_reference_url(references)
 
     url = f"{JIMENG_BASE_URL.rstrip('/')}/images/generations"
     headers = {
@@ -48,43 +142,21 @@ def generate_image(
     }
     payload: dict = {
         "model": JIMENG_MODEL,
-        "prompt": prompt[:800],
-        "size": IMAGE_SIZE,
-        "response_format": "url",
-        "watermark": IMAGE_WATERMARK,
-        "sequential_image_generation": "disabled",
+        "prompt": prompt[:4000],
+        "size": img_size,
+        "n": 1,
     }
-
-    refs = [p for p in references if Path(p).exists()]
-    if refs:
-        encoded = [_encode_image(p) for p in refs]
-        payload["image"] = encoded[0] if len(encoded) == 1 else encoded
+    if ref_url:
+        payload["image"] = ref_url
 
     last_err: Exception | None = None
     for attempt in range(REQUEST_RETRIES + 1):
         try:
-            resp = requests.post(
-                url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT
-            )
-            if resp.status_code >= 400:
-                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:600]}")
-            data = resp.json()
-
-            # response_format=url
-            img_url = _extract_url(data)
-            if img_url:
-                img_bytes = requests.get(img_url, timeout=REQUEST_TIMEOUT).content
-                dest.write_bytes(img_bytes)
-                return dest
-
-            # response_format=b64_json fallback
-            b64 = _extract_b64(data)
-            if b64:
-                dest.write_bytes(base64.b64decode(b64))
-                return dest
-
-            raise RuntimeError(f"响应中没有 url 或 b64_json: {json.dumps(data)[:500]}")
-
+            task_id = _submit_task(url, headers, payload)
+            img_url = _poll_task(task_id, headers)
+            img_bytes = requests.get(img_url, timeout=REQUEST_TIMEOUT).content
+            dest.write_bytes(img_bytes)
+            return dest
         except Exception as e:
             last_err = e
             if attempt < REQUEST_RETRIES:
@@ -92,60 +164,99 @@ def generate_image(
             else:
                 break
 
-    raise RuntimeError(f"即梦生图失败（已重试）: {last_err}")
+    raise RuntimeError(f"gpt-image-2 生图失败（已重试）: {last_err}")
 
 
-def _encode_image(path: Path) -> str:
-    data = Path(path).read_bytes()
-    b64 = base64.b64encode(data).decode("ascii")
-    ext = Path(path).suffix.lower().lstrip(".")
-    mime = "jpeg" if ext in ("jpg", "jpeg") else "png"
-    return f"data:image/{mime};base64,{b64}"
+def _submit_task(url: str, headers: dict, payload: dict) -> str:
+    resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"提交任务 HTTP {resp.status_code}: {resp.text[:500]}")
+    data = resp.json()
+    task_id = data.get("task_id") or data.get("id")
+    if not task_id:
+        raise RuntimeError(f"提交任务无 task_id: {json.dumps(data)[:400]}")
+    return task_id
 
 
-def _extract_url(data: dict) -> str | None:
-    if "data" in data and isinstance(data["data"], list) and data["data"]:
-        item = data["data"][0]
-        if isinstance(item, dict) and item.get("url"):
-            return item["url"]
-    return data.get("url")
+def _poll_task(task_id: str, headers: dict) -> str:
+    """轮询任务直到 succeeded，返回图片 URL。"""
+    poll_url = f"{JIMENG_BASE_URL.rstrip('/')}/images/generations/{task_id}"
+    running = {"queued", "running", "processing", "pending", "in_progress", ""}
+    for _ in range(IMAGE_POLL_MAX_TRIES):
+        r = requests.get(poll_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        if r.status_code >= 400:
+            raise RuntimeError(f"轮询 HTTP {r.status_code}: {r.text[:300]}")
+        data = r.json().get("data", {})
+        status = data.get("status")
+        if status == "succeeded":
+            img_url = data.get("url")
+            if img_url:
+                return img_url
+            raise RuntimeError(f"任务成功但无 url: {json.dumps(data)[:300]}")
+        if status and status not in running:
+            raise RuntimeError(f"任务失败 status={status} err={data.get('error')}")
+        time.sleep(IMAGE_POLL_INTERVAL)
+    raise RuntimeError(f"任务轮询超时（{IMAGE_POLL_MAX_TRIES}×{IMAGE_POLL_INTERVAL}s）")
 
 
-def _extract_b64(data: dict) -> str | None:
-    if "data" in data and isinstance(data["data"], list) and data["data"]:
-        item = data["data"][0]
-        if isinstance(item, dict) and item.get("b64_json"):
-            return item["b64_json"]
-    return None
+def generate_image_candidates(
+    *,
+    prompt: str,
+    dest_dir: Path,
+    base_name: str,
+    n: int = 3,
+    references: Iterable[Path | str] = (),
+    mock: bool = False,
+    label: str = "",
+    seeds: list[int] | None = None,
+    reference_url: str | None = None,
+    size: str | None = None,
+) -> list[Path]:
+    """单页 N 候选生图（串行调用 generate_image）。
+
+    gpt-image-2 无 seed，多样性来自模型自身随机性。失败容错：至少返回 1 张。
+    """
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    n = max(1, min(n, 5))
+
+    # 参考图只需托管一次，复用给所有候选
+    ref_url = reference_url or _resolve_reference_url(references)
+
+    results: list[Path] = []
+    errors: list[str] = []
+    for i in range(1, n + 1):
+        dest = dest_dir / f"{base_name}_cand{i}.png"
+        try:
+            generate_image(
+                prompt=prompt, dest=dest, mock=mock,
+                label=f"{label} cand{i}", reference_url=ref_url, size=size,
+            )
+            results.append(dest)
+        except Exception as e:
+            errors.append(f"cand{i}: {e}")
+
+    if not results:
+        raise RuntimeError(f"全部 {n} 张候选图都失败：{' | '.join(errors)}")
+    return results
 
 
-# ---------- 占位图（无 API 时使用，便于调试 PPT 版式） ----------
+# ---------- 占位图（无 API / mock 时） ----------
 def _save_mock_image(dest: Path, prompt: str, label: str) -> None:
-    w, h = 2048, 1536
+    w, h = 1536, 1024
     img = Image.new("RGB", (w, h), (244, 240, 232))
     draw = ImageDraw.Draw(img)
-
-    # 渐变色块 = 视觉占位
     for y in range(h):
         v = int(232 + (y / h) * 16)
         draw.line([(0, y), (w, y)], fill=(v, v - 4, v - 12))
-
-    # 大字标签
     draw.text((80, 80), f"[MOCK] {label}", fill=(80, 70, 60))
-
-    # 显示 prompt 头
-    pre = prompt[:280]
-    y = 220
-    for line in _wrap(pre, 60)[:7]:
+    y = 200
+    for line in _wrap(prompt[:280], 60)[:7]:
         draw.text((80, y), line, fill=(40, 40, 40))
         y += 56
-
-    draw.text(
-        (80, h - 120),
-        "Configure JIMENG_API_KEY / ARK_API_KEY in .env to render real images.",
-        fill=(120, 110, 100),
-    )
-
+    draw.text((80, h - 100),
+              "Set IMAROUTER_API_KEY in .env to render real images.",
+              fill=(120, 110, 100))
     img.save(dest, "PNG")
 
 

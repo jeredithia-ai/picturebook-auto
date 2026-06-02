@@ -18,7 +18,8 @@ class PageSpec:
     index: int               # 0 = 封面，1-7 = 故事页
     page_type: str           # "cover" | "story"
     text: str = ""           # 英文台词
-    scene: str = ""          # 场景描述（中/英均可）
+    scene: str = ""          # 场景描述（英文，AI 抽取的简短 visual hint）
+    scene_cn: str = ""       # v1.9 新增：中文画面描述（120-220 字，主体+动作+环境+氛围），喂给 Doubao Seedream
     text_corner: str = ""    # "top-left" | "top-right" | "bottom-left" | "bottom-right"
     expression: str = ""     # 该页人物情绪（如 "excited" / "worried" / "amazed"）
     shot: str = ""           # "close" | "medium" | "full" | "wide"，留空走默认 medium
@@ -47,14 +48,18 @@ class BookOutline:
     vocabulary_exposure: list[str] = field(default_factory=list)
     vocabulary_simple: list[str] = field(default_factory=list)  # 单行模式
 
+    # v1.4 新增：教学元信息
+    phonics: str = ""              # 自然拼读规则（如 'consonant blend "fr" (friendship)'）
+    grammar_focus: str = ""        # 主语法点（如 "一般现在时态" / "Simple past tense"）
+    reader_type: str = ""          # 读者类型（覆盖 _default_reader_type 推断）
+    fiction_type: str = ""         # v1.8：L3-L6 用，取值 "fiction" / "non-fiction"
+    lesson_time: str = "60 mins"   # 默认 60 分钟
+    theme: str = ""                # 主题（如 "friendship"）
+
     # 角色别名映射（如 {"anna": "mia", "kevin": "tommy"}）
-    # 让本书自定义角色名继承 Mia/Tommy 的视觉 IP（发型/服装/参考图）
     aliases: dict[str, str] = field(default_factory=dict)
 
-    # 自定义独立角色（v1.3.2 新增）
-    # 形如 {"anna": "Anna: 12y GIRL, black hair in two short braids, mustard yellow cardigan, ..."}
-    # 出现在 Custom_<Name>: <description> outline 头部字段
-    # 这些角色是全新人物，不与 Mia/Tommy 共用参考图
+    # 自定义独立角色（v1.3.2）
     custom_characters: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -81,6 +86,24 @@ class BookOutline:
         if self.vocabulary_simple:
             return self.vocabulary_simple
         return self.vocabulary_mastery + self.vocabulary_exposure
+
+    @property
+    def level_key(self) -> str:
+        """返回 'smart' / '0' / '1' / ... / '6' 用于查表。"""
+        s = (self.level or "").strip().lower()
+        if "smart" in s:
+            return "smart"
+        digits = "".join(ch for ch in s if ch.isdigit())
+        return digits or "1"
+
+    @property
+    def is_dual_vocab_level(self) -> bool:
+        """L0/L1/L2 用双行 Mastery+Exposure；L3-L6 用单行 Vocabulary 4 词。"""
+        return self.level_key in ("smart", "0", "1", "2")
+
+    @property
+    def story_text(self) -> str:
+        return " ".join(p.text for p in self.pages if p.page_type == "story" and p.text).strip()
 
     def validate(self) -> None:
         if not self.title.strip():
@@ -115,7 +138,8 @@ def parse_outline_text(text: str) -> BookOutline:
             current = None
 
     field_re = re.compile(
-        r"^(Title|Level|Book|CEFR|Lexile|Word_?count|IP_?Age|"
+        r"^(Title|Level|Book|CEFR|Lexile|Word_?count|IP_?Age|Theme|"
+        r"Phonics|Grammar(?:_?Focus)?|Reader_?Type|Lesson_?Time|"
         r"Vocabulary_?Mastery|Vocabulary_?Exposure|Vocabulary|Aliases|Custom_\w+)\s*:\s*(.*)$",
         re.I,
     )
@@ -201,6 +225,14 @@ def parse_outline_text(text: str) -> BookOutline:
     voc_mastery = _split_words(meta.get("vocabularymastery", ""))
     voc_exposure = _split_words(meta.get("vocabularyexposure", ""))
 
+    phonics = meta.get("phonics", "").strip()
+    grammar_focus = (
+        meta.get("grammarfocus", "").strip() or meta.get("grammar", "").strip()
+    )
+    reader_type = meta.get("readertype", "").strip()
+    lesson_time = meta.get("lessontime", "").strip() or "60 mins"
+    theme = meta.get("theme", "").strip()
+
     # 角色别名：解析 "anna=mia, kevin=tommy" 形式
     aliases = _parse_aliases(meta.get("aliases", ""))
 
@@ -226,6 +258,11 @@ def parse_outline_text(text: str) -> BookOutline:
         vocabulary_mastery=voc_mastery,
         vocabulary_exposure=voc_exposure,
         vocabulary_simple=voc_simple,
+        phonics=phonics,
+        grammar_focus=grammar_focus,
+        reader_type=reader_type,
+        lesson_time=lesson_time,
+        theme=theme,
         aliases=aliases,
         custom_characters=custom_characters,
     )

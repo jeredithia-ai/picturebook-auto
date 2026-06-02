@@ -169,3 +169,95 @@ elif outline.has_double_vocab:
 | Tommy 表情忧伤 | Expression 字段写明 "BIG OPEN LAUGHING HAPPY SMILE, definitely NOT sad, NOT frowning" |
 | 饼干画了 7 片不是 4 片 | 模型对数量描述不敏感，能接受 ±2 偏差，过分追求精确数字反而不划算 |
 
+---
+
+# v1.4 沉淀（2026-05-31）—— 4 件套 + Web App
+
+## 1. 词汇必须 lemma 原型（Storybook Style Guide 强制）
+
+**现象**：早期 mock 抽词出现 `runs` / `rolls` / `sees` / `walking` 这种屈折形式。
+
+**根因**：模型默认从语料里挑高频词，会带时态/单复数。
+
+**修复**：
+- `ai_extractor.py` system prompt 显式写 "Vocabulary MUST be in lemma form: 'walk' not 'walks/walking', 'friend' not 'friends'. Lowercase. No punctuation."
+- `_clean_words` 用 regex 去标点 + 强制小写 + 去重。
+- 老师在 Web UI 的词表 input 里仍可手动改回 `walks`（如果绘本就讲第三人称单数），但默认 lemma。
+
+> 类似官方 L0/L1/L2 RR 样本里的词汇严格 lemma：`cow / horse / pig / duck` `run / rest / smile` `count / apple / tree / book`。
+
+## 2. Reading Report 题量梯度 — 用户口径胜过样本
+
+**冲突**：官方样本里 Smart Farm Animals = 5 题，L1 He Can Run = 4 题，L4 Visiting Scotland = 4 题。
+但用户口径：**L0-2 = 4 题，L3-6 = 5 题**。
+
+**决议**：严格按用户口径。代码里 `config.rr_question_distribution(level)` 是单一真相源：
+```python
+L0/L1/L2 → [1, 2, 2, 3]    # 4 题
+L3/L4/L5/L6 → [1, 2, 2, 2, 3]  # 5 题
+```
+
+**P# 规则**：
+- ⭐ 和 ⭐⭐ 是事实回忆题，**必须**带 `(P2)`、`(P3)` 等具体页码。
+- 末尾 ⭐⭐⭐ 是 PBL/个人观点题，**不带 P#**。
+- AI 抽取 prompt 强制约束这点，否则会到处补 (P#) 闹笑话。
+
+## 3. Worksheet 模板复制 — 别用 python-pptx 删 slide
+
+**现象**：从 `templates/worksheet_a4.pptx`（7 个 Level 母版）复制对应那页作为底版，删除其它 6 页时 `prs.save()` 抛 `Duplicate name: 'ppt/slides/slide5.xml'`。
+
+**根因**：python-pptx 删除 slide 只删 `sldIdLst` 项 + 关系，**part 仍然滞留在 package._parts 里**。下一次 `add_slide` 申请新 partname 时和滞留的撞车。
+
+**修复**：放弃复制模板的策略，改为**自己重绘底版**：
+- 读 A4 模板提取 7 Level 品牌色 → 硬编码到 `config.BRAND_COLORS`
+- 拷一张 `assets/brand/dino_logo.png`（Dino mascot）
+- 每张 slide 自己画：外框 brand 矩形 + 内白色圆角内容区 + 顶部 Dino logo + 右上 "Name" 五边形 + 右下 footer
+
+更稳定，省了 5MB 模板加载，也避免了 lxml 深拷贝错位。
+
+## 4. Doubao API 走 OpenAI 兼容协议
+
+火山方舟（Volcengine Ark）支持 OpenAI 协议，所以：
+```python
+from openai import OpenAI
+client = OpenAI(api_key=ARK_KEY, base_url="https://ark.cn-beijing.volces.com/api/v3")
+resp = client.chat.completions.create(
+    model="doubao-...",  # 注意：实际生产建议用 endpoint id (ep-xxx-xxx)
+    response_format={"type": "json_object"},
+    ...
+)
+```
+
+**坑**：`model` 字段在 Volcengine 上往往是 endpoint ID（`ep-xxx`），不是公开模型名。
+教师部署时需在 .env 里把 `DOUBAO_MODEL` 改成自己的 endpoint。
+
+## 5. 字体 Poppins 必须本地装才显示
+
+**现象**：python-pptx 给 Run 设 `font.name = "Poppins"` 后，PowerPoint 在没装 Poppins 的电脑上自动 fallback 到 Calibri。
+
+**对策**：
+- 把 19 weight Poppins ttf 都拷到 `assets/fonts/Poppins/`
+- 提供 `INSTALL_FONT.txt` 指引老师双击安装
+- Streamlit Cloud 部署时把 ttf 也带进 repo（git lfs 不必，<200KB/file）
+
+## 6. Streamlit 单页流程 — Session State 的"快照"陷阱
+
+**现象**：用户改了词表，再点 Generate 时拿到的还是旧词表。
+
+**根因**：`extract_all` 返回的 `ExtractedContent` 是 dataclass。我把它存进 `st.session_state.extracted` 后，子表单里的 `st.text_input` 写回 `ec.mastery = ...` 是对**同一个对象**修改 OK；
+但如果误把 `ec` 解构成 dict 再 setattr 到不同对象就会断链。
+
+**对策**：UI 永远操作 `st.session_state.extracted` 这个 dataclass 实例本身（in-place 修改），生成时再 `apply_extracted_to_outline(outline, ec)`。
+
+## 7. 4 件套交付的"组合规则"陷阱
+
+| 文件 | 来源 |
+|---|---|
+| Picture Book PPT | outline + 8 张图 |
+| Worksheet PPTX | outline + `_worksheet_questions`（attach 上去的） |
+| Reading Report DOCX | outline + `_rr_questions` |
+| Teacher's Guide DOCX | outline + `_rr_questions` + `_worksheet_questions` |
+
+> **共享同一个 BookOutline**！`apply_extracted_to_outline` + `attach_rr_questions` + `attach_worksheet_questions` 三步必须在生成任何文件**之前**完成，不然 TG 里 Comprehension Questions 段空的、Worksheet 段空的。
+
+

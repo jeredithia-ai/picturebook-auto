@@ -5,3 +5,6 @@ __pycache__/
 outputs/
 .pytest_cache/
 *.log
+.streamlit/secrets.toml
+# 嵌套的独立 git 仓库（参考资料，不作为子模块纳入）
+references/worksheet-RR-checking/

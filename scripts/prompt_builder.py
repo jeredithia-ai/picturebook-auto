@@ -36,6 +36,12 @@ import re as _re
 from pathlib import Path
 from dataclasses import dataclass
 
+from character_registry import (
+    REGISTRY as CHAR_REGISTRY,
+    get_description as registry_get_desc,
+    get_reference_path as registry_get_ref,
+    resolve_name as registry_resolve_name,
+)
 from config import CHARACTERS_DIR, STYLE_DIR, TEXT_SAFE_RATIO_MIN, TEXT_SAFE_RATIO_MAX
 from parser import BookOutline, PageSpec
 
@@ -277,14 +283,48 @@ def build_page_prompt(page: PageSpec, book: BookOutline, ip_age: int) -> BuiltPr
     custom_characters = getattr(book, "custom_characters", {}) or {}
     cast = detect_cast(cast_text, aliases)
 
-    # 检测自定义角色（如 Anna）是否在本页出现
+    # ==== v1.4: 自动识别 registry 里所有已知角色（含 Anna / Teacher Kim / Winnie / Cate 等）====
+    # 跳过已经被 detect_cast 处理过的 mia/tommy/parents
+    handled = {"mia", "tommy", "mom", "dad"}
+    registry_in_scene: list[dict] = []  # 每项 {key, name_in_story, description, ref_path}
+    for key, char in CHAR_REGISTRY.items():
+        if key in handled:
+            continue
+        # 匹配 key 本身 OR 任何 alias
+        name_to_match = [key.replace("_", " ")] + list(char.get("aliases", []))
+        matched_alias = None
+        for name in name_to_match:
+            if _re.search(rf"\b{_re.escape(name)}\b", cast_text, _re.I):
+                matched_alias = name
+                break
+        if not matched_alias:
+            continue
+        # 取年龄合适的描述
+        if char.get("kind") in ("adult", "pet", "brand", "family"):
+            age_key = next(iter(char.get("description_by_age", {}).keys()), "adult")
+        else:
+            age_key = ip_age
+        desc = registry_get_desc(key, age_key) or ""
+        ref = registry_get_ref(key, age_key)
+        registry_in_scene.append({
+            "key": key,
+            "name_in_story": matched_alias.capitalize(),
+            "description": desc,
+            "ref_path": ref,
+        })
+
+    # 检测自定义角色（向后兼容 BookOutline.custom_characters，如手动注册的）
     custom_in_scene: list[tuple[str, str]] = []
     for name, desc in custom_characters.items():
+        # 若 registry 已经处理过同名角色，跳过避免重复
+        if any(r["name_in_story"].lower() == name.lower() or r["key"] == name.lower() for r in registry_in_scene):
+            continue
         if _re.search(rf"\b{_re.escape(name)}\b", cast_text, _re.I):
             custom_in_scene.append((name, desc))
 
-    # 封面默认所有主角出场：优先用自定义角色；若无则默认 Mia+Tommy
-    if page.page_type == "cover" and not (cast["mia"] or cast["tommy"]) and not custom_in_scene:
+    # 封面默认所有主角出场：优先 registry/custom；否则默认 Mia+Tommy
+    if (page.page_type == "cover" and not (cast["mia"] or cast["tommy"])
+            and not registry_in_scene and not custom_in_scene):
         cast["mia"] = True
         cast["tommy"] = True
 
@@ -306,15 +346,21 @@ def build_page_prompt(page: PageSpec, book: BookOutline, ip_age: int) -> BuiltPr
         inv_aliases.setdefault(target, []).append(alias_name)
 
     # 同框人数 ≥2 时改用 COMPACT_IP_BLOCKS（LOCK + 参考图当主锁，文字只留关键差异点）
-    total_chars = sum([cast["mia"], cast["tommy"], cast["parents"]]) + len(custom_in_scene)
+    total_chars = (
+        sum([cast["mia"], cast["tommy"], cast["parents"]])
+        + len(custom_in_scene)
+        + len(registry_in_scene)
+    )
     multi_char = total_chars >= 2
     mia_src = COMPACT_IP_BLOCKS if multi_char else IP_BLOCKS
     tommy_src = COMPACT_IP_BLOCKS if multi_char else IP_BLOCKS
     parents_block = COMPACT_PARENTS_BLOCK if multi_char else PARENTS_BLOCK
 
-    # IP 行（合并 Custom + Mia/Tommy/Parents 为一行，作为外观锚定）
-    # 自定义角色先出现（主角优先），Mia/Tommy 作为配角排后
+    # IP 行（合并所有角色为一行，作为外观锚定）
+    # 顺序：registry 已知主角/配角先（按故事中出场顺序）→ custom → Mia/Tommy → parents
     ip_lines: list[str] = []
+    for r in registry_in_scene:
+        ip_lines.append(r["description"])
     for _name, desc in custom_in_scene:
         ip_lines.append(desc)
     if cast["mia"]:
@@ -411,12 +457,15 @@ def build_page_prompt(page: PageSpec, book: BookOutline, ip_age: int) -> BuiltPr
 
     prompt = " ".join(part for part in (head, mid, anchor, lock, tail_keep) if part).strip()
 
-    # 参考图收集（自定义角色优先附图）
+    # 参考图收集（registry 角色 + custom 角色 + Mia/Tommy + 配角）
     scene_text_for_refs = f"{page.text or ''} {page.scene or ''}"
     secondary_refs = _detect_secondary_refs(scene_text_for_refs)
     custom_names_in_scene = [name for name, _ in custom_in_scene]
+    registry_refs = [r["ref_path"] for r in registry_in_scene if r["ref_path"]]
     references = _collect_references_v2(
-        cast, ip_age, secondary_refs, custom_names=custom_names_in_scene
+        cast, ip_age, secondary_refs,
+        custom_names=custom_names_in_scene,
+        registry_refs=registry_refs,
     )
     return BuiltPrompt(prompt=prompt, references=references)
 
@@ -496,10 +545,12 @@ def _collect_references_v2(
     ip_age: int,
     secondary_refs: list[Path],
     custom_names: list[str] | None = None,
+    registry_refs: list[Path] | None = None,
 ) -> list[Path]:
-    """参考图优先级（受 4 张上限约束，v1.3.2：自定义独立角色升至最高优先级）：
-    1. <custom_name>_age{N}.png           —— 本书自定义独立角色（如 Anna）最高优先级
-    2. mia_age{N}.png / tommy_age{N}.png  —— 经典 IP 单角色专属设定图
+    """参考图优先级（受 4 张上限约束，v1.4：registry 角色升至最高优先级）：
+    0. registry 角色专属图（含 Anna / Teacher Kim / Winnie 等）—— 本书的主角
+    1. <custom_name>_age{N}.png           —— 旧版手工注册的自定义角色
+    2. mia_age{N}.png / tommy_age{N}.png  —— 经典 IP 单角色设定
     3. character_bible（净版优先）        —— 多角色合体设定图（兜底）
     4. parents_reference                  —— 父母 IP
     5. secondary refs                     —— 苏格兰人/羊 等次要角色
@@ -507,7 +558,12 @@ def _collect_references_v2(
     """
     refs: list[Path] = []
 
-    # v1.3.2：本书自定义独立角色（如 Anna）最高优先级
+    # v1.4: registry 已知角色（如 Anna 主角）最高优先级
+    for p in registry_refs or []:
+        if p and p.exists():
+            refs.append(p)
+
+    # 向后兼容：旧版手工 custom_characters 注册的
     for name in custom_names or []:
         p = CHARACTERS_DIR / f"{name}_age{ip_age}.png"
         if p.exists():
