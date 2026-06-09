@@ -2635,19 +2635,23 @@ def _init_main_nav() -> None:
         st.session_state["main_nav"] = tab
     elif "main_nav" not in st.session_state:
         st.session_state["main_nav"] = "overview"
+    nav_key = st.session_state.get("main_nav", "overview")
+    if nav_key in _MAIN_NAV:
+        st.session_state["main_nav_radio"] = _MAIN_NAV[nav_key]
 
 
 def _go_to_nav(key: str) -> None:
     if key not in _MAIN_NAV:
         return
     st.session_state["main_nav"] = key
+    st.session_state["main_nav_radio"] = _MAIN_NAV[key]
     st.query_params["tab"] = key
     _persist_storage(_NAV_COOKIE, key)
     st.rerun()
 
 
 def _render_app_header_compact() -> None:
-    """顶栏：Kidde logo + pill 导航 + 设置 / 开始制作。"""
+    """顶栏：Kidde logo + pill 主导航；非制作页时右侧显示快捷「开始制作」。"""
     b64 = _icon_b64()
     img = (
         f"<img src='data:image/png;base64,{b64}' class='nav-dino-logo' alt='Kidde'/>"
@@ -2694,19 +2698,15 @@ def _render_app_header_compact() -> None:
                     st.session_state.pop("_authed_user", None)
                     _clear_storage(_AUTH_COOKIE)
                     st.rerun()
-            else:
-                b1, b2 = st.columns(2)
-                with b1:
-                    if st.button("设置", key="hdr_settings", use_container_width=True):
-                        _go_to_nav("settings")
-                with b2:
-                    if st.button("开始制作", key="hdr_start", type="primary", use_container_width=True):
-                        _go_to_nav("work")
+            elif nav != "work":
+                if st.button("开始制作 →", key="hdr_start", type="primary", use_container_width=True):
+                    _go_to_nav("work")
             st.markdown("</div>", unsafe_allow_html=True)
 
     selected_key = keys[labels.index(selected)]
     if selected_key != nav:
         st.session_state["main_nav"] = selected_key
+        st.session_state["main_nav_radio"] = _MAIN_NAV[selected_key]
         st.query_params["tab"] = selected_key
         _persist_storage(_NAV_COOKIE, selected_key)
         st.rerun()
@@ -3091,13 +3091,13 @@ def main() -> None:
             <span class='create-icon'>✨</span>
             <div>
               <h2>生成绘本</h2>
-              <p>快速转换故事文本为专业教学课件</p>
             </div>
           </div>
         </section>
         """,
         unsafe_allow_html=True,
     )
+    st.caption("在此填写书名、级别、故事 → AI 抽取 → 出图 → 下载 4 件套")
     _key_status_banner()
 
     nav_sel = _render_deliverable_nav()
