@@ -94,11 +94,15 @@ def curriculum_section_tables() -> list[tuple[str, dict[str, list[str]]]]:
 def _cjk_font(size: int, *, bold: bool = False):
     from PIL import ImageFont
 
+    bundled = _ROOT / "assets/fonts/NotoSansSC"
     win = Path("C:/Windows/Fonts")
     candidates = [
+        bundled / ("NotoSansCJKsc-Bold.otf" if bold else "NotoSansCJKsc-Regular.otf"),
+        bundled / "NotoSansSC-Variable.ttf",
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+        Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
         win / ("msyhbd.ttc" if bold else "msyh.ttc"),
         win / ("simhei.ttf" if bold else "simsun.ttc"),
-        _ROOT / "assets/fonts/Poppins/Poppins-Bold.ttf" if bold else _ROOT / "assets/fonts/Poppins/Poppins-Regular.ttf",
     ]
     for p in candidates:
         if p.exists():

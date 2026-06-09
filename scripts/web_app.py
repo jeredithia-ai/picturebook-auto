@@ -2317,8 +2317,10 @@ def _render_curriculum_map() -> None:
             st.image(str(_CMAP_PREVIEW), use_container_width=True,
                      caption="对外一页纸预览（A4 横向）")
         else:
+            st.markdown(render_mini_map_html(logo_html), unsafe_allow_html=True)
+            st.caption("竖版长图尚未生成；上方为 HTML 课程地图。可下载下方 PNG 或点「生成完整资料包」。")
             st.image(mini_map_png_bytes(), use_container_width=True,
-                     caption="课程迷你梯度图（完整长图生成中或需点击下方「生成完整资料包」）")
+                     caption="课程迷你梯度图 PNG（已内置 Noto 中文字体，云端可正常显示）")
 
         c0, c1, c2, c3, c4 = st.columns(5)
         with c0:
