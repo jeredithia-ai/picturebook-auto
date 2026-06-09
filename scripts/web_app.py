@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
+import hmac
 import io
 import os
 import re
@@ -31,10 +33,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from ai_extractor import (
     QUESTION_INSTRUCTIONS, QUESTION_POOL, QUESTION_TITLES,
     apply_extracted_to_outline, extract_all, generate_one_worksheet_question,
+    generate_story_draft,
 )
 from auto_fill import auto_summary
 from config import (
@@ -52,6 +56,13 @@ from reading_report_builder import attach_rr_questions, build_reading_report
 from seedream_client import generate_image, generate_image_for_level
 from teacher_guide_builder import build_teacher_guide
 from worksheet_builder import attach_worksheet_questions, build_worksheet
+from curriculum_display import (
+    curriculum_section_tables,
+    level_metrics_rows,
+    mini_map_png_bytes,
+    render_mini_map_html,
+    section_to_rows,
+)
 
 
 def run_with_live_timer(label: str, fn, *args, tick: float = 0.4, done_note: str = "", **kwargs):
@@ -1405,12 +1416,21 @@ def _run_storyboard_drafts(mock_images: bool) -> None:
         dest = img_dir / f"draft_{page.index:02d}_v{ver}.png"
         return (page, prompt, list(refs)[:1], ver, dest)
 
-    tasks = [_build(p) for p in pages]
     concurrency = max(1, int(os.getenv("IMAGE_CONCURRENCY", "2")))
-    n = len(tasks)
-    progress = st.progress(0, "生成分镜草图…")
+    n = len(pages)
+    progress = st.progress(0, "准备分镜 prompt…")
     status = st.empty()
     errors: dict[int, str] = {}
+    tasks = []
+    for i, p in enumerate(pages, 1):
+        status.text(f"组装 prompt {i}/{n}…")
+        progress.progress(i / (n + 1), f"组装 prompt {i}/{n}")
+        tasks.append(_build(p))
+    if mock_images:
+        status.text("占位图模式：快速生成 8 张草图…")
+    else:
+        status.text(f"调用 gpt-image-2（{min(concurrency, n)} 张并发，首张约 30–60 秒）…")
+    progress.progress(0, "生成分镜草图…")
 
     def _work(t):
         page, prompt, refs, ver, dest = t
@@ -1446,7 +1466,7 @@ def storyboard_ready() -> bool:
     return bool(st.session_state.get("storyboard_confirmed"))
 
 
-def _render_storyboard_panel() -> None:
+def _render_storyboard_panel(mock_images: bool) -> None:
     """生图前【分镜确认台】（用户拍板 2026-06-08 · 方案A+硬门）：
       ① 一键出 8 张快速草图分镜；
       ② 每页：草图 + 可编辑的中文故事描述（安全线）；
@@ -1460,7 +1480,6 @@ def _render_storyboard_panel() -> None:
     except Exception:
         return
 
-    _force_mock = not bool(JIMENG_API_KEY)
     sb: dict = st.session_state.get("storyboard") or {}
     confirmed = storyboard_ready()
 
@@ -1471,10 +1490,14 @@ def _render_storyboard_panel() -> None:
             " → ③ 点「✅ 确认全部分镜」。**只有确认后才允许正式逐张出高清图。**"
             "草图为低分快稿（不放大、不自审），仅供审稿。"
         )
+        if mock_images:
+            st.caption("🟡 当前为占位图模式：分镜草图几秒内出完，不调 API。")
+        else:
+            st.caption("⏳ 未勾选占位图：分镜草图会调 gpt-image-2，8 张约 2–8 分钟，进度条走满前请耐心等待。")
         cda, cdb = st.columns([1, 3])
         with cda:
             if st.button("🎬 生成 / 重出 8 张分镜草图", type="primary", key="sb_gen_btn"):
-                _run_storyboard_drafts(_force_mock)
+                _run_storyboard_drafts(mock_images)
                 st.rerun()
         with cdb:
             if not sb:
@@ -1609,7 +1632,7 @@ def _render_step6_image_gen(step_num: int, embed: bool = False) -> None:
 
         # 生图前【分镜确认台】（方案A+硬门）：先出 8 张草图 + 改故事描述 → 确认后才放行正式出图。
         #   （内含逐页中文故事描述编辑，等价并取代原独立的场景安全线面板）
-        _render_storyboard_panel()
+        _render_storyboard_panel(mock_imgs)
         _sb_ok = storyboard_ready()
 
         col_a, col_b = st.columns([4, 1])
@@ -2145,75 +2168,70 @@ def _render_global_standards_panel() -> None:
 
 
 _DELIVERABLES = [
-    ("book", "📖 绘本 PPT"),
-    ("ws", "📝 练习册 Worksheet"),
-    ("rr", "📄 阅读报告 RR"),
-    ("tg", "👩‍🏫 教师指南 TG"),
+    ("book", "📖 绘本"),
+    ("ws", "📝 练习"),
+    ("rr", "📄 RR"),
+    ("tg", "👩‍🏫 TG"),
 ]
+_KIT_LABEL = "绘本 · 练习 · RR · TG"
 
 
 def _render_deliverable_nav() -> str:
-    """侧边栏顶部：4 交付物左侧竖向导航（Element Plus tab-position=left 效果）。
-
-    点哪个交付物只渲染哪个 → 主区不再一页拉很长。抽取完成前不显示，默认返回 'book'。
-    """
+    """主区顶部：4 交付物横向切换。抽取完成前不显示，默认返回 'book'。"""
     if st.session_state.get("extracted") is None:
         return "book"
     labels = [lbl for _, lbl in _DELIVERABLES]
-    with st.sidebar:
-        st.markdown("<div class='nav-title'>🗂️ 交付物</div>", unsafe_allow_html=True)
-        sel = st.radio(
-            "交付物导航", labels,
-            label_visibility="collapsed",
-            key="deliverable_nav",
-        )
-        st.divider()
+    st.markdown("<div class='nav-title-inline'>🗂️ 交付物</div>", unsafe_allow_html=True)
+    sel = st.radio(
+        "交付物导航", labels,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="deliverable_nav",
+    )
     for k, lbl in _DELIVERABLES:
         if lbl == sel:
             return k
     return "book"
 
 
-def _render_evals_sidebar() -> None:
-    """侧边栏：一键体检（evals）— 对当前 outline 跑纯规则检查，出红/黄/绿报告。"""
-    with st.sidebar:
-        st.markdown("### 🔬 一键体检 (evals)")
-        st.caption("对当前故事跑规则检查：词汇 lemma/小写/专有名词、绘本 IP+年龄、Worksheet 结构、RR 星级。")
-        if not st.button("运行体检", width="stretch", key="run_evals_btn"):
-            return
-        outline = st.session_state.get("outline")
-        ec = st.session_state.get("extracted")
-        if not outline:
-            st.warning("请先完成 AI 抽取，再运行体检。")
-            return
-        try:
-            from evals import run_all, format_report, OK, WARN, ERROR
-            ws = getattr(ec, "worksheet_questions", None) if ec else None
-            rr = (getattr(ec, "reading_report", None)
-                  or getattr(ec, "rr_items", None)) if ec else None
-            report = run_all(
-                outline=outline,
-                worksheet_questions=ws,
-                rr_items=rr,
-                cast_pool=st.session_state.get("story_cast_pool") or None,
-                generic_overrides=st.session_state.get("generic_overrides") or None,
-            )
-            if report.passed and report.n_warn == 0:
-                st.success("✅ 全部通过，无问题")
-            elif report.passed:
-                st.info(f"✅ 无硬性错误，{report.n_warn} 条提醒")
+def _render_evals_panel() -> None:
+    """一键体检（evals）— 对当前 outline 跑纯规则检查，出红/黄/绿报告。"""
+    st.caption("对当前故事跑规则检查：词汇 lemma/小写/专有名词、绘本 IP+年龄、Worksheet 结构、RR 星级。")
+    if not st.button("运行体检", width="stretch", key="run_evals_btn"):
+        return
+    outline = st.session_state.get("outline")
+    ec = st.session_state.get("extracted")
+    if not outline:
+        st.warning("请先完成 AI 抽取，再运行体检。")
+        return
+    try:
+        from evals import run_all, OK, WARN, ERROR
+        ws = getattr(ec, "worksheet_questions", None) if ec else None
+        rr = (getattr(ec, "reading_report", None)
+              or getattr(ec, "rr_items", None)) if ec else None
+        report = run_all(
+            outline=outline,
+            worksheet_questions=ws,
+            rr_items=rr,
+            cast_pool=st.session_state.get("story_cast_pool") or None,
+            generic_overrides=st.session_state.get("generic_overrides") or None,
+        )
+        if report.passed and report.n_warn == 0:
+            st.success("✅ 全部通过，无问题")
+        elif report.passed:
+            st.info(f"✅ 无硬性错误，{report.n_warn} 条提醒")
+        else:
+            st.error(f"❌ {report.n_error} 条硬性问题需修，{report.n_warn} 条提醒")
+        for it in report.issues:
+            if it.level == ERROR:
+                st.markdown(f"❌ **[{it.category}]** {it.msg}")
+            elif it.level == WARN:
+                st.markdown(f"⚠️ [{it.category}] {it.msg}")
             else:
-                st.error(f"❌ {report.n_error} 条硬性问题需修，{report.n_warn} 条提醒")
-            for it in report.issues:
-                if it.level == ERROR:
-                    st.markdown(f"❌ **[{it.category}]** {it.msg}")
-                elif it.level == WARN:
-                    st.markdown(f"⚠️ [{it.category}] {it.msg}")
-                else:
-                    st.markdown(f"✅ <span style='color:#888'>[{it.category}] {it.msg}</span>",
-                                unsafe_allow_html=True)
-        except Exception as e:
-            st.warning(f"体检执行出错：{e}")
+                st.markdown(f"✅ <span style='color:#888'>[{it.category}] {it.msg}</span>",
+                            unsafe_allow_html=True)
+    except Exception as e:
+        st.warning(f"体检执行出错：{e}")
 
 
 _DINO_ICON = BRAND_DIR / "dino_head_icon.png"
@@ -2256,26 +2274,28 @@ _CMAP_PREVIEW = _FRAMEWORK_DIR / "_preview_onepager.png"
 _READING_LOGO = BRAND_DIR / "dino_reading_logo.png"
 
 
-# 迷你梯度地图（网页常驻）：级别配色 = 练习册同款（config.BRAND_COLORS）。
-# 每级别只放最直观字段：阅读阶段 / 学生年龄·学校年级 / CEFR / RAZ / 剑桥考试 / 核心目标。
-# (level_key, 阅读阶段, 学生年龄, 学校年级, CEFR, RAZ, 剑桥考试, 核心目标, 难度高度px)
-_MINI_MAP = [
-    ("0", "夯实基础", "4–5岁", "幼儿园", "Pre-A1", "aa–A", "Starters", "听懂·会指认", 32),
-    ("1", "夯实基础", "5–6岁", "学前", "Pre-A1→A1", "A–B", "Starters", "拼读·敢开口", 42),
-    ("2", "夯实基础", "6–7岁", "一年级", "A1", "C–D", "Starters–Movers", "读懂小故事", 53),
-    ("3", "进阶提升", "7–8岁", "二年级", "A1+", "E–G", "Movers", "自主读·会提取", 66),
-    ("4", "进阶提升", "8–9岁", "三年级", "A2", "H–J", "Flyers", "抓细节·会归纳", 80),
-    ("5", "流利阅读", "9–10岁", "四年级", "A2+", "K–M", "Flyers–KET", "会推理·会比较", 95),
-    ("6", "自主阅读", "10–11岁", "五年级", "B1", "N–P", "KET–PET", "能思辨·会评价", 110),
-]
+def _ensure_curriculum_assets(*, force: bool = False) -> None:
+    """按需生成 Excel / HTML / PDF / 竖版长图（与 build_curriculum_xlsx.DATA 同源）。"""
+    if st.session_state.get("_cmap_build_tried") and not force:
+        return
+    st.session_state["_cmap_build_tried"] = True
+    _FRAMEWORK_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if force or not _CMAP_XLSX.exists():
+            from build_curriculum_xlsx import build as build_xlsx
+            build_xlsx()
+        if force or not _CMAP_HTML.exists():
+            from build_curriculum_onepager import build as build_html
+            build_html()
+        if force or not _CMAP_LONGIMG.exists():
+            from build_curriculum_longimg import build as build_longimg
+            build_longimg()
+    except Exception as e:
+        st.session_state["_cmap_build_err"] = str(e)
 
 
 def _render_curriculum_map() -> None:
-    """顶部「0–6 课程地图」：网页常驻迷你梯度图（直观）+ 可展开下载对外 PDF / Excel。
-
-    迷你图为纯内联 HTML（不依赖任何文件，永远显示）；级别配色取自练习册同款品牌色。
-    详细对标总表与可打印一页纸放在下方展开区下载（同源）。
-    """
+    """0–6 课程地图：迷你梯度图（HTML·永远显示）+ 展开区下载长图/PDF/Excel（与教研总表同源）。"""
     logo_b64 = ""
     try:
         logo_b64 = base64.b64encode(_READING_LOGO.read_bytes()).decode("ascii")
@@ -2283,87 +2303,66 @@ def _render_curriculum_map() -> None:
         pass
     logo_html = (f"<img src='data:image/png;base64,{logo_b64}' style='height:30px'/>"
                  if logo_b64 else "<span style='font-size:22px'>🦖</span>")
+    st.markdown(render_mini_map_html(logo_html), unsafe_allow_html=True)
 
-    # —— 迷你梯度地图：7 个台阶，高度随难度递增，按级别配色（练习册同款）——
-    cells = []
-    for key, stage, age, grade, cefr, raz, exam, goal, h in _MINI_MAP:
-        color = brand_color_hex(key)
-        cells.append(
-            f"<div class='cm-col'>"
-            f"<div class='cm-stage' style='color:{color};border-color:{color}55'>{stage}</div>"
-            f"<div class='cm-goal'>{goal}</div>"
-            f"<div class='cm-bar' style='height:{h}px;background:linear-gradient(180deg,{color},{color}cc)'>"
-            f"<span class='cm-lv'>L{key}</span></div>"
-            f"<div class='cm-cefr' style='color:{color}'>{cefr}</div>"
-            f"<div class='cm-raz'>RAZ {raz}</div>"
-            f"<div class='cm-exam'>{exam}</div>"
-            f"<div class='cm-age'>{age} · {grade}</div>"
-            f"</div>"
-        )
-    mini = f"""
-    <style>
-      .cm-wrap{{border:1px solid #f0e3da;border-radius:14px;padding:12px 16px 10px;
-        background:linear-gradient(135deg,#fff,#fff8f3);margin:2px 0 8px;}}
-      .cm-head{{display:flex;align-items:center;gap:10px;margin-bottom:10px;}}
-      .cm-head .t{{font-weight:800;font-size:15px;color:#1f2937;}}
-      .cm-head .s{{font-size:11.5px;color:#9aa1ab;}}
-      .cm-row{{display:flex;align-items:flex-end;gap:8px;}}
-      .cm-col{{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;}}
-      .cm-stage{{font-size:9.5px;font-weight:800;border:1px solid;border-radius:999px;
-        padding:1px 7px;margin-bottom:4px;white-space:nowrap;background:#fff;}}
-      .cm-goal{{font-size:10.5px;font-weight:700;color:#374151;margin-bottom:5px;height:15px;white-space:nowrap;}}
-      .cm-bar{{width:100%;border-radius:9px 9px 4px 4px;display:flex;align-items:flex-start;
-        justify-content:center;padding-top:6px;box-shadow:0 3px 8px rgba(0,0,0,.08);}}
-      .cm-lv{{color:#fff;font-weight:900;font-size:16px;letter-spacing:.5px;text-shadow:0 1px 2px rgba(0,0,0,.2);}}
-      .cm-cefr{{font-size:11.5px;font-weight:800;margin-top:5px;}}
-      .cm-raz{{font-size:9.5px;color:#6b7280;font-weight:700;margin-top:1px;}}
-      .cm-exam{{font-size:10px;color:#6b7280;font-weight:600;}}
-      .cm-age{{font-size:10px;color:#9aa1ab;margin-top:1px;}}
-      .cm-foot{{font-size:10.5px;color:#9aa1ab;margin-top:9px;text-align:center;}}
-    </style>
-    <div class='cm-wrap'>
-      <div class='cm-head'>{logo_html}
-        <span class='t'>0–6 课程地图</span>
-        <span class='s'>· 一眼看清每级别：阅读阶段 / 年龄学龄 / 欧标 / RAZ / 剑桥 / 核心目标（详细对标见下方下载）</span>
-      </div>
-      <div class='cm-row'>{''.join(cells)}</div>
-      <div class='cm-foot'>颜色 = 练习册级别色 · 欧标 CEFR 权威；阅读阶段 / RAZ / 剑桥考试 / 年龄年级为对标参考</div>
-    </div>
-    """
-    st.markdown(mini, unsafe_allow_html=True)
-
-    with st.expander("🗺️ 详细课程级别介绍（竖版长图分享 · 对外 PDF · 教研 Excel 对标总表）", expanded=False):
+    with st.expander(
+        "🗺️ 详细课程级别介绍（竖版长图 · 一页纸 PDF · 教研 Excel · 完整维度表）",
+        expanded=False,
+    ):
+        _ensure_curriculum_assets()
         if _CMAP_LONGIMG.exists():
             st.image(str(_CMAP_LONGIMG), use_container_width=True,
-                     caption="竖版长图：级别为列、维度为行的完整对比（适合微信 / 朋友圈分享）")
+                     caption="竖版长图：级别为列、维度为行（与北美外教阅读课对标表同源，适合分享）")
         elif _CMAP_PREVIEW.exists():
             st.image(str(_CMAP_PREVIEW), use_container_width=True,
-                     caption="对外一页纸预览（A4 横向 · 可打印 / 另存 PDF）")
+                     caption="对外一页纸预览（A4 横向）")
         else:
-            st.caption("预览图未生成，可直接下载下方文件查看。")
-        c0, c1, c2, c3 = st.columns(4)
+            st.image(mini_map_png_bytes(), use_container_width=True,
+                     caption="课程迷你梯度图（完整长图生成中或需点击下方「生成完整资料包」）")
+
+        c0, c1, c2, c3, c4 = st.columns(5)
         with c0:
+            st.download_button(
+                "⬇️ 迷你梯度图 PNG",
+                mini_map_png_bytes(),
+                file_name="VIPKID_Dino_课程地图迷你图_L0-L6.png",
+                mime="image/png",
+                width="stretch",
+                key="dl_mini_map_png",
+            )
+        with c1:
             if _CMAP_LONGIMG.exists():
-                st.download_button("⬇️ 竖版长图 PNG（分享）", _CMAP_LONGIMG.read_bytes(),
+                st.download_button("⬇️ 竖版长图 PNG", _CMAP_LONGIMG.read_bytes(),
                                    file_name="VIPKID_Dino_课程级别长图_L0-L6.png",
                                    mime="image/png", width="stretch")
-        with c1:
+        with c2:
             if _CMAP_PDF.exists():
-                st.download_button("⬇️ 一页纸 PDF（对外）", _CMAP_PDF.read_bytes(),
+                st.download_button("⬇️ 一页纸 PDF", _CMAP_PDF.read_bytes(),
                                    file_name="VIPKID_Dino_课程地图_L0-L6.pdf",
                                    mime="application/pdf", width="stretch")
-        with c2:
+        with c3:
             if _CMAP_XLSX.exists():
-                st.download_button("⬇️ Excel 对标总表（教研/销售）", _CMAP_XLSX.read_bytes(),
+                st.download_button("⬇️ Excel 对标总表", _CMAP_XLSX.read_bytes(),
                                    file_name="VIPKID_Dino_课程对标总表_L0-L6.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    width="stretch")
-        with c3:
+        with c4:
             if _CMAP_HTML.exists():
-                st.download_button("⬇️ 网页版 HTML（自带打印按钮）", _CMAP_HTML.read_bytes(),
+                st.download_button("⬇️ 网页版 HTML", _CMAP_HTML.read_bytes(),
                                    file_name="VIPKID_Dino_课程地图_L0-L6.html",
                                    mime="text/html", width="stretch")
-        st.caption("长图 / PDF / Excel / HTML 四份内容同源。长图直接发图；HTML 用浏览器打开点「打印」即可另存 A4 横向 PDF。")
+            elif st.button("🔄 生成完整资料包", key="build_cmap_btn", width="stretch"):
+                st.session_state.pop("_cmap_build_tried", None)
+                _ensure_curriculum_assets(force=True)
+                st.rerun()
+
+        err = st.session_state.get("_cmap_build_err")
+        if err:
+            st.caption(f"⚠️ 完整资料包生成部分失败（迷你图 PNG 始终可下）：{err}")
+        st.caption(
+            "ᴿ = 对标参考值（依 CEFR 推导，可校准）；其余为官方 S&S / TG 权威值。"
+            "长图 / PDF / Excel / HTML 四份内容同源。"
+        )
 
 
 def _sec_head(icon: str, title: str) -> None:
@@ -2381,23 +2380,21 @@ def _chips(items, kind: str = "") -> None:
     st.markdown(f"<div class='chip-row'>{spans}</div>", unsafe_allow_html=True)
 
 
-def _render_sidebar_brand() -> None:
-    """侧边栏顶部品牌标，让左栏一眼可识别。"""
-    b64 = _icon_b64()
-    img = (f"<img src='data:image/png;base64,{b64}' class='side-dino'/>"
-           if b64 else "🦖")
-    st.sidebar.markdown(
-        f"<div class='side-brand'>{img}<span>VIPKID Dino<br><small>绘本教学工作台</small></span></div>",
-        unsafe_allow_html=True,
-    )
+_MAIN_NAV = {
+    "overview": "概览",
+    "background": "背景",
+    "features": "功能",
+    "onboarding": "新手引导",
+    "metrics": "指标",
+    "work": "开始制作",
+    "settings": "设置",
+}
+_LEGACY_NAV = {"guide": "overview", "faq": "onboarding"}
+_AUTH_COOKIE = "dino_auth"
+_NAV_COOKIE = "dino_tab"
 
 
-def _require_password() -> None:
-    """可选访问密码门。
-
-    仅当配置了 APP_PASSWORD（Streamlit Cloud 的 Secrets 或环境变量）时才启用；
-    未配置则直接放行（本地 / 内网不受影响）。验证通过后本会话记住，不再追问。
-    """
+def _get_app_password() -> str:
     pwd = ""
     try:
         pwd = str(st.secrets.get("APP_PASSWORD", "")).strip()
@@ -2405,17 +2402,364 @@ def _require_password() -> None:
         pwd = ""
     if not pwd:
         pwd = os.getenv("APP_PASSWORD", "").strip()
-    if not pwd or st.session_state.get("_authed"):
+    return pwd
+
+
+def _make_auth_token(pwd: str) -> str:
+    """HMAC 令牌：可存浏览器，不含明文密码。"""
+    return hmac.new(pwd.encode(), b"vipkid-dino-auth-v1", hashlib.sha256).hexdigest()
+
+
+def _verify_auth_token(token: str, pwd: str) -> bool:
+    if not token or not pwd:
+        return False
+    try:
+        return hmac.compare_digest(token, _make_auth_token(pwd))
+    except Exception:
+        return False
+
+
+def _storage_bridge(storage_key: str, query_key: str) -> None:
+    """把 localStorage 里的值同步到 URL query，刷新后可恢复状态。"""
+    components.html(
+        f"""
+        <script>
+        (function() {{
+          try {{
+            const saved = localStorage.getItem({storage_key!r});
+            const url = new URL(window.location);
+            if (saved && !url.searchParams.has({query_key!r})) {{
+              url.searchParams.set({query_key!r}, saved);
+              window.location.replace(url);
+            }}
+          }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _persist_storage(storage_key: str, value: str) -> None:
+    safe = value.replace("\\", "\\\\").replace("'", "\\'")
+    components.html(
+        f"<script>try{{localStorage.setItem('{storage_key}','{safe}');}}catch(e){{}}</script>",
+        height=0,
+    )
+
+
+def _clear_storage(storage_key: str) -> None:
+    components.html(
+        f"<script>try{{localStorage.removeItem('{storage_key}');}}catch(e){{}}</script>",
+        height=0,
+    )
+
+
+def _init_main_nav() -> None:
+    _storage_bridge(_NAV_COOKIE, "tab")
+    tab = st.query_params.get("tab", "")
+    tab = _LEGACY_NAV.get(tab, tab)
+    if tab in _MAIN_NAV:
+        st.session_state["main_nav"] = tab
+    elif "main_nav" not in st.session_state:
+        st.session_state["main_nav"] = "overview"
+
+
+def _go_to_nav(key: str) -> None:
+    if key not in _MAIN_NAV:
+        return
+    st.session_state["main_nav"] = key
+    st.query_params["tab"] = key
+    _persist_storage(_NAV_COOKIE, key)
+    st.rerun()
+
+
+def _render_app_header_compact() -> None:
+    """顶栏：左侧品牌 + 右侧 pill 导航（参考 PRD 顶栏）。"""
+    b64 = _icon_b64()
+    img = (f"<img src='data:image/png;base64,{b64}' class='hero-dino' alt='Dino'/>"
+           if b64 else "<span style='font-size:34px'>🦖</span>")
+    nav = st.session_state.get("main_nav", "work")
+    labels = list(_MAIN_NAV.values())
+    keys = list(_MAIN_NAV.keys())
+    idx = keys.index(nav) if nav in keys else 0
+
+    st.markdown('<div id="app-header-anchor"></div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        c_brand, c_nav = st.columns([1.05, 1.95], vertical_alignment="center")
+        with c_brand:
+            st.markdown(
+                f"""
+                <div class='app-topbar-brand'>
+                  {img}
+                  <div>
+                    <div class='app-topbar-title'>VIPKID Dino · 线下绘本教学</div>
+                    <div class='app-topbar-sub'>输入书名与级别 → AI 生成故事 → 微调 → {_KIT_LABEL}</div>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with c_nav:
+            st.markdown('<div class="main-nav-wrap">', unsafe_allow_html=True)
+            selected = st.radio(
+                "主导航",
+                labels,
+                index=idx,
+                horizontal=True,
+                label_visibility="collapsed",
+                key="main_nav_radio",
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    selected_key = keys[labels.index(selected)]
+    if selected_key != nav:
+        st.session_state["main_nav"] = selected_key
+        st.query_params["tab"] = selected_key
+        _persist_storage(_NAV_COOKIE, selected_key)
+        st.rerun()
+
+
+def _render_overview_section() -> None:
+    """概览：一句话价值 + 关键数字 + 课程地图 + 进入制作（不再重复 Hero/Dino）。"""
+    st.markdown(
+        "<div class='page-lead'>"
+        "<h2>让线下绘本教学更省心</h2>"
+        "<p>输入书名与级别 → AI 生成故事 → 老师微调 → 一键产出 "
+        f"{_KIT_LABEL}</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("4 大交付物", _KIT_LABEL)
+    m2.metric("必填输入", "书名 + Level")
+    m3.metric("AI 抽取", "约 2–3 分钟")
+    m4.metric("级别覆盖", "L0 – L6")
+    _render_curriculum_map()
+    st.markdown("---")
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        if st.button("👉 开始制作", type="primary", use_container_width=True, key="cta_work"):
+            _go_to_nav("work")
+    with c2:
+        st.caption("第一次使用？建议先看 **新手引导** 走查一遍流程。")
+    with st.expander("版本信息", expanded=False):
+        st.markdown(
+            "**v3.3**：文本走 Claude · 生图走 gpt-image-2 · 中文 prompt（主体+行为+环境）。"
+        )
+
+
+def _render_background_section() -> None:
+    """背景：为什么做、教学定位、全局底层逻辑。"""
+    st.subheader("背景")
+    st.markdown(
+        "VIPKID Dino 线下绘本教学系统，面向 **0–13 岁** 分级英文故事课。"
+        "把老师从「重复排版、拆词、出题、做课件」里解放出来，"
+        "让你把精力放在 **故事审核与课堂设计** 上。"
+    )
+    st.markdown("##### 设计原则")
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        st.markdown("**📐 标准焊死**  \nCEFR / 词表格式 / 页数 / 留白等由系统强制套用，批量生产不跑偏。")
+    with b2:
+        st.markdown("**🎭 IP 一致**  \n官方角色库 + 参考图锁定，全本生图主角不跳帧。")
+    with b3:
+        st.markdown("**✏️ 人机协同**  \nAI 先抽、老师后改；每一步可审核、可回退。")
+    st.divider()
+    _render_global_standards_panel()
+
+
+def _render_features_section() -> None:
+    """功能：各模块能做什么（信息层，不含操作台）。"""
+    st.subheader("功能")
+    st.caption("以下为系统能力说明；实际操作请切到 **开始制作**。")
+    feats = [
+        ("🤖 AI 智能抽取", "从故事原文自动拆 7 页、抽词表/拼读/语法、出 Worksheet 与 RR 题。"),
+        ("🖼️ 绘本", "IP 锁定 → 画风设定 → 分页编辑 → 单页生图 → 组装 PPT Reader。"),
+        ("📝 练习", "逐题换型/改难度/AI 重出/配图，一键生成 Worksheet PPTX。"),
+        ("📄 RR", "阅读表达题预览与单题修改，空白版/示例版可选。"),
+        ("👩‍🏫 TG", "自动生成 Teacher's Guide DOCX。"),
+        ("📚 批量生产", "一次跑多本大纲，适合系列化备课。"),
+        ("📤 上传成品绘本", "已有 PDF/PPT/散图 → 只出 WS + RR + TG 教辅三件套。"),
+    ]
+    for title, desc in feats:
+        with st.expander(title, expanded=False):
+            st.markdown(desc)
+    st.divider()
+    st.markdown("##### 4 大交付物规格速查")
+    cols = st.columns(4)
+    for i, key in enumerate(["book", "worksheet", "rr", "tg"]):
+        spec = DELIVERABLE_SPECS[key]
+        with cols[i]:
+            with st.popover(f"{spec['icon']} {spec['name']}"):
+                st.markdown(render_deliverable_spec_md(key))
+
+
+def _faq_items() -> list[tuple[str, str]]:
+    return [
+        (
+            "刷新后又要输入密码？",
+            "登录成功后会在浏览器 **localStorage** 保存 HMAC 校验令牌（**不含明文密码**）。"
+            "若仍失效，请检查浏览器是否禁用本地存储。",
+        ),
+        (
+            "AI 抽取大概要多久？",
+            "通常 **2–3 分钟**。**抽取过程中请勿关闭或刷新页面**，否则会中断任务。",
+        ),
+        (
+            "哪些是必填项？",
+            "**Book Title** 与 **Level**；故事由 AI 根据书名自动生成，可在文本框微调。",
+        ),
+        (
+            "故事怎么分页？",
+            "AI 生成或粘贴的故事 → 自动均分到 7 页；若标注了 `Page 1`… 则按你的分页走。",
+        ),
+        (
+            "4 件套分别是什么？",
+            f"{_KIT_LABEL}；共享同一份 AI 抽取数据。",
+        ),
+        (
+            "生图 API 不可用？",
+            "无 Key 时走 **mock 占位图**，文本抽取仍可用。详见 **设置 → 服务连接**。",
+        ),
+    ]
+
+
+def _render_onboarding_section() -> None:
+    """新手引导：5 步走查 + FAQ。"""
+    st.subheader("新手引导")
+    steps = [
+        ("填写书名与级别", "在 **开始制作** 填 **Book Title** + **Level**（必填）。"),
+        ("生成故事草稿", "点 **AI 生成故事草稿**，或抽取时自动生成。"),
+        ("人工微调", "在故事文本框里改句子、换人名或细节。"),
+        ("AI 抽取", "约 2–3 分钟，期间 **勿刷新页面**。"),
+        ("微调并下载", "切换 **绘本 / 练习 / RR / TG**，组装后下载 ZIP。"),
+    ]
+    for i, (title, desc) in enumerate(steps, 1):
+        st.markdown(f"**第 {i} 步 · {title}**  \n{desc}")
+    st.divider()
+    if st.button("去开始制作 →", type="primary", key="onboard_go_work"):
+        _go_to_nav("work")
+    st.markdown("---")
+    st.markdown("##### 常见问题")
+    for q, a in _faq_items():
+        with st.expander(q, expanded=False):
+            st.markdown(a)
+
+
+def _render_metrics_section() -> None:
+    """指标：与教研 Excel 同源的完整对标 + 绘本产出相关字段。"""
+    st.subheader("指标")
+    st.markdown(
+        "对标 **VIPKID Dino 北美外教阅读能力达成** 与线下绘本 0–6 体系。"
+        "下表与《课程对标总表_L0-L6.xlsx》同源；带 **ᴿ** 的维度为参考对标值，其余为官方权威值。"
+    )
+    st.markdown("##### 级别速览（选 Level 时对照）")
+    st.dataframe(level_metrics_rows(), use_container_width=True, hide_index=True)
+
+    st.markdown("##### 完整维度表（与 Excel 六段一致）")
+    for section_name, section_data in curriculum_section_tables():
+        with st.expander(section_name, expanded=(section_name.startswith("①"))):
+            st.dataframe(section_to_rows(section_data), use_container_width=True, hide_index=True)
+
+    st.markdown("##### 绘本产出质量指标（抽取后 / 设置 → 体检）")
+    st.markdown(
+        f"- **{_KIT_LABEL}**：共享同一份 AI 抽取数据  \n"
+        "- **词汇**：lemma 小写、L0–2 双行词表 / L3–6 单行  \n"
+        "- **绘本**：IP 年龄档、参考图、7 页分页  \n"
+        "- **练习**：6 页固定结构  \n"
+        "- **RR**：L0–2 共 4 题 / L3–6 共 5 题（星级分布）  \n"
+        "- **TG**：8 模块 + 与 Worksheet 答案一致"
+    )
+    _ensure_curriculum_assets()
+    if any(p.exists() for p in (_CMAP_PDF, _CMAP_XLSX, _CMAP_LONGIMG)):
+        st.markdown("##### 下载完整对标资料")
+        dl = st.columns(4)
+        with dl[0]:
+            if _CMAP_LONGIMG.exists():
+                st.download_button("⬇️ 竖版长图", _CMAP_LONGIMG.read_bytes(),
+                                   file_name=_CMAP_LONGIMG.name, mime="image/png",
+                                   key="metrics_dl_long")
+        with dl[1]:
+            if _CMAP_PDF.exists():
+                with open(_CMAP_PDF, "rb") as f:
+                    st.download_button("⬇️ PDF 一页纸", f.read(), _CMAP_PDF.name, key="metrics_dl_pdf")
+        with dl[2]:
+            if _CMAP_XLSX.exists():
+                with open(_CMAP_XLSX, "rb") as f:
+                    st.download_button("⬇️ Excel 总表", f.read(), _CMAP_XLSX.name, key="metrics_dl_xlsx")
+        with dl[3]:
+            st.download_button("⬇️ 迷你图 PNG", mini_map_png_bytes(),
+                               file_name="VIPKID_Dino_课程地图迷你图_L0-L6.png",
+                               mime="image/png", key="metrics_dl_mini")
+
+
+def _render_settings_section() -> None:
+    st.subheader("设置")
+    st.markdown("##### 🔑 服务连接")
+    _key_status_banner()
+    st.caption("API Key 通过环境变量或 Streamlit Secrets 配置，页面不会显示或缓存 Key 本身。")
+
+    st.divider()
+    st.markdown("##### 🎨 默认画风（新绘本自动套用，工作台内仍可再改）")
+    _render_style_panel_step(3, embed=True)
+
+    st.divider()
+    st.markdown("##### 🔬 质量体检")
+    _render_evals_panel()
+
+    st.divider()
+    if _get_app_password():
+        if st.button("退出登录", type="secondary", key="logout_btn"):
+            st.session_state.pop("_authed", None)
+            st.query_params.clear()
+            _clear_storage(_AUTH_COOKIE)
+            st.rerun()
+
+
+def _validate_required_inputs(title: str, raw_story: str = "") -> list[str]:
+    errors: list[str] = []
+    if not (title or "").strip():
+        errors.append("Book Title 不能为空")
+    story = (raw_story or "").strip()
+    if story and len(story.split()) < 15:
+        errors.append("故事过短（建议至少 15 个英文词），请补充或重新生成")
+    return errors
+
+
+def _require_password() -> None:
+    """可选访问密码门。
+
+    仅当配置了 APP_PASSWORD 时才启用。验证通过后写入 HMAC 令牌到 localStorage（不含明文密码）。
+    """
+    pwd = _get_app_password()
+    if not pwd:
         return
 
+    _storage_bridge(_AUTH_COOKIE, "auth")
+
+    if st.session_state.get("_authed"):
+        return
+
+    token = st.query_params.get("auth", "")
+    if token and _verify_auth_token(token, pwd):
+        st.session_state["_authed"] = True
+        return
+    if token:
+        st.query_params.clear()
+        _clear_storage(_AUTH_COOKIE)
+
     st.markdown("## 🔒 VIPKID Dino 绘本工作台")
-    st.caption("请输入访问密码（向管理员获取）。")
+    st.caption("请输入访问密码（向管理员获取）。登录状态会记住本机，**不会保存明文密码**。")
     with st.form("login_gate", clear_on_submit=False):
         entered = st.text_input("访问密码", type="password")
         ok = st.form_submit_button("进入")
     if ok:
         if entered == pwd:
+            auth_token = _make_auth_token(pwd)
             st.session_state["_authed"] = True
+            st.query_params["auth"] = auth_token
+            _persist_storage(_AUTH_COOKIE, auth_token)
             st.rerun()
         st.error("密码错误，请重试。")
     st.stop()
@@ -2427,20 +2771,11 @@ def main() -> None:
         page_title="VIPKID Dino 线下绘本教学",
         page_icon=_icon_arg,
         layout="wide",
+        initial_sidebar_state="collapsed",
     )
     _inject_css()
     _require_password()
-
-    _render_sidebar_brand()
-    _render_hero()
-    _render_curriculum_map()
-    with st.expander("ℹ️ 使用说明 / 版本信息", expanded=False):
-        st.markdown(
-            "**流程**：填 ① 书名 ② Level ③ 故事原文 → 点「AI 抽取」→ 在左侧 4 交付物里逐个微调 → 各自产出。  \n"
-            "**v3.3**：文本走 Claude · 生图走 gpt-image-2（主角恒首位参考，全本不跳帧）· 中文 prompt（主体+行为+环境）。"
-        )
-
-    _key_status_banner()
+    _init_main_nav()
 
     # Session 状态
     if "extracted" not in st.session_state:
@@ -2448,12 +2783,32 @@ def main() -> None:
     if "outline" not in st.session_state:
         st.session_state.outline = None
 
-    # 左侧竖向导航（4 交付物）放在侧边栏最上方，再渲染体检
-    nav_sel = _render_deliverable_nav()
-    _render_evals_sidebar()
+    _render_app_header_compact()
+    nav = st.session_state.get("main_nav", "overview")
 
-    # ---------- Section 0：全局底层逻辑（只读·一眼看清今天要做什么）----------
-    _render_global_standards_panel()
+    if nav == "overview":
+        _render_overview_section()
+        return
+    if nav == "background":
+        _render_background_section()
+        return
+    if nav == "features":
+        _render_features_section()
+        return
+    if nav == "onboarding":
+        _render_onboarding_section()
+        return
+    if nav == "metrics":
+        _render_metrics_section()
+        return
+    if nav == "settings":
+        _render_settings_section()
+        return
+
+    # ---------- nav == work：制作工作台 ----------
+    _key_status_banner()
+
+    nav_sel = _render_deliverable_nav()
 
     # ---------- 模式：单本 / 批量 ----------
     mode = st.radio(
@@ -2471,51 +2826,47 @@ def main() -> None:
         return
 
     # ---------- Section A：输入表单 ----------
-    # v1.8.2：极简输入 — 必填只有 3 项，其余全自动 + 透明展示
     st.success(
-        "🎯 **必填只有 3 项**：① Book Title  ② Level  ③ 故事原文  \n"
-        "   其余全部由 AI 根据这 3 项自动推断（CEFR / 蓝思 / 字数 / 故事类型 / 主题 / 主角识别 / Phonics / 语法 / 词表）  \n"
-        "   👇 填完点 AI 抽取后，会立即显示「📊 AI 推断卡片」+「🎭 主角识别面板」让你审核。"
+        f"🎯 **必填 2 项**：① Book Title  ② Level  \n"
+        "   **故事由 AI 根据书名自动生成**（约 30 秒），可在下方文本框人工微调后再抽取  \n"
+        f"   其余（CEFR / 词表 / 语法 / 题目等）在 **AI 抽取** 时自动推断 → 产出 {_KIT_LABEL}"
     )
+
+    if "raw_story_input" not in st.session_state:
+        st.session_state.raw_story_input = ""
 
     with st.form("input_form"):
         # === 必填区 ===
         _sec_head("1", "必填基础信息")
-        _chips(["① Book Title", "② Level", "③ 故事原文"], kind="ok")
+        _chips(["① Book Title", "② Level", "③ 故事（AI 生成·可改）"], kind="ok")
         col1, col2 = st.columns([3, 1])
         with col1:
             title = st.text_input(
                 "📕 Book Title *",
-                value="What Makes a Good Friend?",
-                help="必填。系统会用它做文件名 / 封面 / 各文档大标题。",
+                value="",
+                placeholder="例如：What Makes a Good Friend?",
+                help="必填。系统会用它做文件名 / 封面 / 各文档大标题，并生成故事内容。",
             )
         with col2:
             level = st.selectbox(
-                "🎚️ Level *", LEVEL_OPTIONS, index=5,
+                "🎚️ Level *", LEVEL_OPTIONS, index=0,
                 help="必填。Smart / 0-2 = 双行词表，3-6 = 单行词表。决定 CEFR / Reader Type / 题数。",
             )
 
         st.markdown(
-            "**📝 故事原文 \\* —— 整篇故事直接粘进来,系统会自动把它"
-            "「完整地」均分成 7 页讲完(封面另算,共 8 页)**"
+            "**📝 故事正文** — AI 根据书名自动生成；你可在此 **微调** 后再抽取"
+            "（系统均分 7 页 · 封面另算共 8 页）"
         )
         st.caption(
-            "🔒 分页规则(已焊死)：①给整篇故事 → 自动按剧情把整个故事均分到 7 页,从开头讲到结尾,不丢内容、不一句一页；"
-            "②若你自己标了 `Page 1` / `Page 2`… → 严格按你的分页走。"
+            "流程：先填书名 + Level → 点「AI 生成故事草稿」→ 改满意了 → 点「AI 抽取」。"
+            "若故事为空直接点抽取，也会自动生成。"
         )
         raw_story = st.text_area(
             "Raw story",
             label_visibility="collapsed",
-            height=200,
-            value=(
-                "Anna felt nervous on her first day in the new class. Her hands shook as she sat down at a small wooden desk.\n"
-                "At recess she saw a girl drop a pile of books on the floor. Anna helped pick up the books and smiled at the girl.\n"
-                "Later she shared pencils and glue with a quiet boy at his table. The boy looked up and said thank you to her softly.\n"
-                "A class hamster grabbed Anna's eraser and ran under a chair. The hamster looked like a tiny thief and everyone laughed together.\n"
-                "Anna listened when classmates told stories about pets and games. She said, 'Tell me more,' and asked each person kind questions.\n"
-                "Her classmates all liked her because she cared about them and helped them. Anna felt glad she had been kind from her very first day.\n"
-                "By the week's end Anna had many new friends and a plan. The next week she would bake cookies and bring them for everyone in the class."
-            ),
+            height=220,
+            placeholder="填写书名后点下方「AI 生成故事草稿」，或留空在抽取时自动生成…",
+            key="raw_story_input",
         )
 
         # === 选填区（折叠）===
@@ -2529,7 +2880,8 @@ def main() -> None:
                 )
                 theme = st.text_input(
                     "Theme",
-                    value="friendship",
+                    value="",
+                    placeholder="留空 = AI 按书名推断",
                     help="主题，会用在 Writing 页 \"Write about ...\" 和 TG 的目标里",
                 )
             with col2:
@@ -2605,75 +2957,111 @@ def main() -> None:
                 help="如：lucy | 8y GIRL, twin braids, red sweater, freckles —— 已在角色库的角色（mia/tommy/anna/teacher_kim/winnie 等）不用填",
             )
 
-        submitted = st.form_submit_button(
-            "🤖 AI 抽取 / 重新抽取", type="primary", width="stretch",
-        )
+        btn_gen, btn_ext = st.columns(2)
+        with btn_gen:
+            gen_story_btn = st.form_submit_button(
+                "✨ AI 生成故事草稿", width="stretch",
+            )
+        with btn_ext:
+            submitted = st.form_submit_button(
+                "🤖 AI 抽取 / 重新抽取", type="primary", width="stretch",
+            )
+
+    if gen_story_btn:
+        if not (title or "").strip():
+            st.error("❌ 请先填写 Book Title")
+        else:
+            draft = run_with_live_timer(
+                "AI 生成故事草稿", generate_story_draft,
+                title.strip(), level, theme.strip(),
+                done_note="可在下方微调",
+            )
+            st.session_state.raw_story_input = draft
+            st.success("✅ 故事草稿已生成，请在下方微调后点「AI 抽取」。")
+            st.rerun()
 
     if submitted:
-        # 先做 AI 自动推断（角色识别 + CEFR/Lexile/Theme/Fiction-NF）—— 实时计时
-        auto = run_with_live_timer(
-            "AI 推断（角色 / CEFR / 主题）", auto_summary, level, raw_story, title,
-        )
-        # 用户没填 cefr / theme / fiction_type 时，用自动值兜底
-        cefr_final = cefr.strip() or auto["cefr"]
-        theme_final = theme.strip() or auto["theme"]
-        # Reader Type：默认「（AI 自动判断）」→ 用 AI 判定值；否则用老师手选值
-        _ft = (fiction_type or "").strip()
-        fiction_final = auto["fiction_type"] if _ft.startswith("（AI") else (_ft or auto["fiction_type"])
-
-        ec = run_with_live_timer(
-            "AI 抽取（抽词 · 拆段 · 出题）", extract_all,
-            raw_story=raw_story, title=title, level=level,
-            cefr=cefr_final, theme=theme_final,
-        )
-        outline = _build_outline(
-            title=title, level=level, book_number=book_number,
-            cefr=cefr_final, theme=theme_final, ip_age=int(ip_age),
-            raw_story=raw_story, custom_chars_text=custom_chars_text,
-            fiction_type=fiction_final,
-        )
-        apply_extracted_to_outline(outline, ec)
-        if enrich_from_syllabus(outline):
-            st.session_state["_syllabus_hit"] = True
-            _sync_ec_from_syllabus(ec, outline)   # 命中大纲→把官方词表/拼读逐字同步进工作台
-        st.session_state.extracted = ec
-        st.session_state.outline = outline
-        st.session_state.auto = auto
-        st.session_state.auto["_lexile"] = auto["lexile"]  # 留作生成阶段元信息
-
-        # v1.9：预生成每页中文 prompt（按 Seedream 4.5 官方指南），存 session 供用户编辑
-        ip_age_val = int(ip_age)
-        cast_pool = st.session_state.get("story_cast_pool") or None
-        generic_overrides = st.session_state.get("generic_overrides") or None
-
-        def _gen_page_prompts() -> dict[int, dict]:
-            pp: dict[int, dict] = {}
-            for page in outline.pages:
-                built = build_cn_page_prompt(
-                    page, outline, ip_age_val,
-                    cast_pool=cast_pool, generic_overrides=generic_overrides,
+        errors = _validate_required_inputs(title, raw_story)
+        if errors:
+            for err in errors:
+                st.error(f"❌ {err}")
+        else:
+            story_text = (raw_story or "").strip()
+            if not story_text:
+                story_text = run_with_live_timer(
+                    "AI 生成故事草稿", generate_story_draft,
+                    title.strip(), level, theme.strip(),
                 )
-                pp[page.index] = {
-                    "positive": built.positive,
-                    "negative": built.negative,
-                    "prompt": built.prompt,
-                    "references": [str(r) for r in built.references],
-                    "must_include": "",
-                    "label": page.label,
-                    "display_name": page_display_name(page.index),
-                }
-            return pp
+                st.session_state.raw_story_input = story_text
+            raw_story = story_text
+            st.warning(
+                "⏳ **本次 AI 抽取预计需要 2–3 分钟**，请稍候。"
+                "抽取过程中 **请勿关闭或刷新** 当前页面，否则会中断任务。"
+            )
+            # 先做 AI 自动推断（角色识别 + CEFR/Lexile/Theme/Fiction-NF）—— 实时计时
+            auto = run_with_live_timer(
+                "AI 推断（角色 / CEFR / 主题）", auto_summary, level, raw_story, title,
+            )
+            # 用户没填 cefr / theme / fiction_type 时，用自动值兜底
+            cefr_final = cefr.strip() or auto["cefr"]
+            theme_final = theme.strip() or auto["theme"]
+            # Reader Type：默认「（AI 自动判断）」→ 用 AI 判定值；否则用老师手选值
+            _ft = (fiction_type or "").strip()
+            fiction_final = auto["fiction_type"] if _ft.startswith("（AI") else (_ft or auto["fiction_type"])
 
-        page_prompts = run_with_live_timer(
-            "生成每页画面提示词", _gen_page_prompts,
-            done_note=f"{len(outline.pages)} 页",
-        )
-        st.session_state.page_prompts = page_prompts
+            ec = run_with_live_timer(
+                "AI 抽取（抽词 · 拆段 · 出题）", extract_all,
+                raw_story=raw_story, title=title, level=level,
+                cefr=cefr_final, theme=theme_final,
+            )
+            outline = _build_outline(
+                title=title, level=level, book_number=book_number,
+                cefr=cefr_final, theme=theme_final, ip_age=int(ip_age),
+                raw_story=raw_story, custom_chars_text=custom_chars_text,
+                fiction_type=fiction_final,
+            )
+            apply_extracted_to_outline(outline, ec)
+            if enrich_from_syllabus(outline):
+                st.session_state["_syllabus_hit"] = True
+                _sync_ec_from_syllabus(ec, outline)   # 命中大纲→把官方词表/拼读逐字同步进工作台
+            st.session_state.extracted = ec
+            st.session_state.outline = outline
+            st.session_state.auto = auto
+            st.session_state.auto["_lexile"] = auto["lexile"]  # 留作生成阶段元信息
 
-        st.success(
-            "✅ 抽取完成。请审核下方「AI 推断 + 主角识别 + 每页卡片（文本+场景+prompt+必须出现）」，"
-            "再点最底部 Generate All。"
-        )
+            # v1.9：预生成每页中文 prompt（按 Seedream 4.5 官方指南），存 session 供用户编辑
+            ip_age_val = int(ip_age)
+            cast_pool = st.session_state.get("story_cast_pool") or None
+            generic_overrides = st.session_state.get("generic_overrides") or None
+
+            def _gen_page_prompts() -> dict[int, dict]:
+                pp: dict[int, dict] = {}
+                for page in outline.pages:
+                    built = build_cn_page_prompt(
+                        page, outline, ip_age_val,
+                        cast_pool=cast_pool, generic_overrides=generic_overrides,
+                    )
+                    pp[page.index] = {
+                        "positive": built.positive,
+                        "negative": built.negative,
+                        "prompt": built.prompt,
+                        "references": [str(r) for r in built.references],
+                        "must_include": "",
+                        "label": page.label,
+                        "display_name": page_display_name(page.index),
+                    }
+                return pp
+
+            page_prompts = run_with_live_timer(
+                "生成每页画面提示词", _gen_page_prompts,
+                done_note=f"{len(outline.pages)} 页",
+            )
+            st.session_state.page_prompts = page_prompts
+
+            st.success(
+                "✅ 抽取完成。请审核下方「AI 推断 + 主角识别 + 每页卡片（文本+场景+prompt+必须出现）」，"
+                "再点最底部 Generate All。"
+            )
 
     # ---------- v2.0：7 步严格解锁绘本组装工作流 ----------
     if st.session_state.extracted is not None:
@@ -2687,7 +3075,7 @@ def main() -> None:
         # 共享抽取数据（词表/语法/拼读/读者类型）— 4 件套都用，放在角标上方
         _render_shared_extract_panel()
 
-        # 左侧侧边栏导航选中哪个交付物 → 主区只渲染那一个（不再用顶部 tabs，避免一页超长）
+        # 交付物横向导航选中哪个 → 主区只渲染那一个
         _sel_label = dict(_DELIVERABLES).get(nav_sel, "")
         st.markdown(f"#### {_sel_label}")
 
@@ -4771,7 +5159,7 @@ def _zoom_image(path, key: str, caption: str = "") -> None:
 def _inject_css() -> None:
     st.markdown(
         """<style>
-        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap');
         :root{
           --brand:#F47332; --brand-dark:#e0601f; --brand-tint:#fff5ef;
           --brand-2:#ff9a4d;
@@ -4783,16 +5171,105 @@ def _inject_css() -> None:
           --shadow-md:0 4px 12px rgba(16,24,40,.06),0 2px 4px rgba(16,24,40,.04);
           --shadow-lg:0 18px 40px -12px rgba(16,24,40,.18);
           --ring:0 0 0 3px rgba(244,115,50,.16);
+          --fs-base:15.5px; --fs-sm:13.5px; --fs-lg:17px;
         }
-        html, body, [class*="css"]{ -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }
+        html, body, [class*="css"]{
+          -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+          font-size:var(--fs-base);
+        }
+        .stApp{ font-size:var(--fs-base); }
         .stApp{
           background:
             radial-gradient(900px 480px at 88% -8%, rgba(244,115,50,.10), transparent 60%),
             radial-gradient(820px 460px at -6% 4%, rgba(120,120,255,.06), transparent 55%),
             var(--bg);
         }
-        .block-container { max-width: 1340px; padding-top: 2.4rem; }
-        body, p, span, div, label, textarea, input, button, select{ font-family:'Inter','Poppins','Segoe UI',sans-serif; }
+        .block-container { max-width: 1340px; padding-top: 1.2rem; }
+
+        /* ---------- 隐藏侧边栏（交付物导航已移至主区） ---------- */
+        [data-testid="stSidebar"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="collapsedControl"]{
+          display:none !important;
+        }
+
+        /* ---------- 顶栏 + 主导航 pill（PRD 风格） ---------- */
+        #app-header-anchor + div[data-testid="stVerticalBlockBorderWrapper"],
+        #app-header-anchor + div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"]{
+          border:1px solid var(--line) !important;
+          border-radius:var(--radius-lg) !important;
+          padding:10px 16px 6px !important;
+          margin-bottom:18px !important;
+          background:linear-gradient(120deg, rgba(255,255,255,.96), rgba(255,247,241,.88)) !important;
+          box-shadow:var(--shadow-md) !important;
+        }
+        .app-topbar-brand{ display:flex; align-items:center; gap:12px; min-width:0; }
+        .app-topbar-title{
+          font-family:'Poppins','Inter',sans-serif; font-size:19px; font-weight:800; color:var(--ink); line-height:1.2;
+        }
+        .app-topbar-sub{ font-size:12px; color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .main-nav-wrap [data-testid="stRadio"]{ width:100%; }
+        .main-nav-wrap [role="radiogroup"]{
+          display:flex; flex-wrap:wrap; justify-content:flex-end; align-items:center;
+          gap:2px; padding:4px; border-radius:999px;
+          background:rgba(18,24,38,.04); border:1px solid var(--line);
+        }
+        .main-nav-wrap input[type="radio"]{ position:absolute !important; opacity:0 !important; width:0 !important; height:0 !important; pointer-events:none !important; }
+        .main-nav-wrap [role="radiogroup"] > label{
+          margin:0 !important; padding:6px 12px !important; border-radius:999px !important;
+          border:none !important; background:transparent !important; box-shadow:none !important;
+          font-weight:600 !important; font-size:12.5px !important; color:var(--muted) !important;
+          transition:all .18s ease !important; cursor:pointer !important;
+          min-height:0 !important; gap:0 !important;
+        }
+        .main-nav-wrap [role="radiogroup"] > label[data-baseweb="radio"] > div:first-child,
+        .main-nav-wrap [role="radiogroup"] > label > div:first-child{
+          display:none !important; width:0 !important; min-width:0 !important; margin:0 !important; padding:0 !important;
+        }
+        .main-nav-wrap [role="radiogroup"] > label:hover{
+          color:var(--brand) !important; background:rgba(244,115,50,.06) !important;
+        }
+        .main-nav-wrap [role="radiogroup"] > label:has(input:checked){
+          color:var(--brand) !important;
+          background:linear-gradient(135deg, rgba(244,115,50,.16), rgba(255,154,77,.12)) !important;
+          box-shadow:0 1px 6px rgba(244,115,50,.18), inset 0 0 0 1px rgba(244,115,50,.22) !important;
+        }
+        .main-nav-wrap [role="radiogroup"] > label > div:last-child,
+        .main-nav-wrap [role="radiogroup"] > label p{
+          padding:0 !important; margin:0 !important; font-size:12.5px !important;
+        }
+        .page-lead h2{ font-size:28px; font-weight:800; margin:0 0 8px; color:var(--ink); }
+        .page-lead p{ color:var(--muted); font-size:var(--fs-lg); margin:0 0 16px; line-height:1.6; }
+        @media (max-width: 1100px){
+          .main-nav-wrap [role="radiogroup"] > label{ padding:5px 9px !important; font-size:11.5px !important; }
+        }
+        @media (max-width: 900px){
+          .main-nav-wrap [role="radiogroup"]{ justify-content:flex-start; }
+          .app-topbar-sub{ white-space:normal; }
+        }
+        .nav-title-inline{
+          font-weight:700; font-size:13px; letter-spacing:.4px; color:var(--faint); margin:.4rem 0 .5rem;
+        }
+        [data-testid="stRadio"] [role="radiogroup"][aria-label="交付物导航"]{
+          gap:8px; flex-wrap:wrap;
+        }
+        [data-testid="stRadio"] [role="radiogroup"][aria-label="交付物导航"] label{
+          padding:8px 16px; border-radius:999px; border:1px solid var(--line);
+          font-weight:600; background:var(--card); transition:all .15s ease;
+        }
+        [data-testid="stRadio"] [role="radiogroup"][aria-label="交付物导航"] label:has(input:checked){
+          color:var(--brand); background:var(--brand-tint); border-color:rgba(244,115,50,.35);
+          box-shadow:inset 0 0 0 1px rgba(244,115,50,.12);
+        }
+        [data-testid="stRadio"] [role="radiogroup"][aria-label="交付物导航"] label > div:first-child{ display:none; }
+
+        body, p, span, div, label, textarea, input, button, select{
+          font-family:'Plus Jakarta Sans','Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif;
+          font-size:var(--fs-base);
+        }
+        [data-testid="stCaption"], .stCaption, small{ font-size:var(--fs-sm) !important; }
+        [data-testid="stMetricValue"]{ font-size:1.35rem !important; }
+        [data-testid="stMetricLabel"]{ font-size:var(--fs-sm) !important; }
 
         /* ---------- 顶部品牌横幅 hero（玻璃 + 网格渐变 高级感） ---------- */
         .hero{
@@ -4855,7 +5332,7 @@ def _inject_css() -> None:
         .side-brand small{ font-weight:600; color:var(--muted); font-size:11px; }
 
         /* ---------- 标题层级 ---------- */
-        h1,h2,h3,h4{ color:var(--ink); font-weight:700; letter-spacing:.1px; font-family:'Poppins','Inter',sans-serif; }
+        h1,h2,h3,h4{ color:var(--ink); font-weight:700; letter-spacing:.1px; font-family:'Plus Jakarta Sans','Noto Sans SC',sans-serif; }
 
         /* ---------- 按钮（高级实心 + 柔和描边 + 微动效） ---------- */
         .stButton > button{

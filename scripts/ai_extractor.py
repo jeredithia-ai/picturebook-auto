@@ -218,6 +218,71 @@ def extract_all(
     return _mock_extract(raw_story, title, level, cefr, theme)
 
 
+# ---------- 从书名 + 级别生成故事草稿（老师微调后再抽取）----------
+_STORY_WORD_TARGETS: dict[str, str] = {
+    "smart": "40–80", "0": "40–80", "1": "60–100", "2": "80–130",
+    "3": "100–160", "4": "130–200", "5": "160–250", "6": "200–320",
+}
+
+
+def generate_story_draft(title: str, level: str, theme: str = "", *, mock: bool | None = None) -> str:
+    """根据书名 + 级别生成英文故事草稿（约 7 句，供拆 7 页正文）。"""
+    title = (title or "").strip()
+    if not title:
+        raise ValueError("Book Title 不能为空")
+    use_mock = MOCK_AI_EXTRACT if mock is None else mock
+    level_key = _level_key(level)
+    theme_hint = (theme or "").strip()
+    if use_mock:
+        return _mock_story_draft(title, level_key, theme_hint)
+    from deepseek_client import deepseek_chat
+
+    wc = _STORY_WORD_TARGETS.get(level_key, "100–160")
+    ip_note = "Use VIPKID characters (Mia, Tommy, Anna, Teacher Kim, Winnie) when they fit the story."
+    system = (
+        "You are a VIPKID Dino children's picture-book writer. "
+        "Write ONE complete English story for offline teaching. "
+        "Rules:\n"
+        f"- Level L{level_key} vocabulary and sentence length; target {wc} words total.\n"
+        "- Exactly 7 sentences (one per story page; cover is separate).\n"
+        "- American English; past tense narrative for fiction; simple, vivid, kid-safe.\n"
+        "- Match the book title theme; clear beginning–middle–end.\n"
+        f"- {ip_note}\n"
+        "- Output ONLY the story text: 7 sentences as plain paragraphs or one block. "
+        "No title line, no page labels, no markdown."
+    )
+    user = f"Book title: {title}\nLevel: L{level_key}"
+    if theme_hint:
+        user += f"\nTheme hint: {theme_hint}"
+    raw = deepseek_chat(
+        system=system,
+        user=user,
+        model=EXTRACT_MODEL,
+        max_tokens=1200,
+        temperature=0.65,
+        timeout=120,
+    )
+    text = (raw or "").strip()
+    if not text:
+        raise RuntimeError("AI 未返回故事内容")
+    return text
+
+
+def _mock_story_draft(title: str, level_key: str, theme: str) -> str:
+    """无 API 时的占位故事（仍可走通流程）。"""
+    t = theme or title.split()[0] if title else "school"
+    name = "Mia" if level_key in ("smart", "0", "1", "2") else "Anna"
+    return (
+        f"{name} wanted to learn about {title.lower()} at school one sunny morning. "
+        f"She listened carefully when Teacher Kim explained why {t} matters to good friends. "
+        f"At recess {name} helped a classmate and shared a kind smile. "
+        f"A small surprise made everyone laugh together in the classroom. "
+        f"{name} asked thoughtful questions and waited for each answer. "
+        f"By the end of the day she felt proud of what she had learned. "
+        f"She made a plan to practice {t} again with her friends tomorrow."
+    )
+
+
 # ---------- 真实调用（2026-06-02 已切到 imarouter Claude/GPT，走 deepseek_chat 健壮封装）----------
 def _doubao_extract(
     raw_story: str, title: str, level: str, cefr: str, theme: str,
@@ -247,6 +312,52 @@ def _doubao_extract(
     )
     data = _loads_robust(raw)
     return _parse_doubao_payload(data, level_key, is_dual, rr_dist, raw_story, pool=pool)
+
+
+def ai_define_words(words: list[str], story: str, level: str = "3",
+                    *, mock: bool | None = None) -> dict[str, str]:
+    """为给定词批量生成"儿童词典式"释义，返回 {小写词: 释义}。
+
+    用于 worksheet 词汇页（看词义猜词 / 谜语四选一）保证有真实释义、绝不出现
+    "meaning of X" 占位。AI 失败 / mock → 返回 {}（上层用 _KID_DICT/留空兜底）。"""
+    seen: list[str] = []
+    for w in words or []:
+        s = str(w or "").strip()
+        if s and s.lower() not in {x.lower() for x in seen}:
+            seen.append(s)
+    if not seen:
+        return {}
+    use_mock = MOCK_AI_EXTRACT if mock is None else mock
+    if use_mock:
+        return {}
+    try:
+        from deepseek_client import deepseek_chat_json
+        system = (
+            "You are a children's picture-dictionary writer. For EACH given word, write ONE "
+            f"very simple, kid-friendly definition suitable for a Level {level} young learner. "
+            "Rules: American English; 4-12 words; lowercase; NO ending period; describe the "
+            "MEANING without repeating the word itself; never output 'meaning of ...' or "
+            "'definition of ...'. Output ONLY a JSON object: "
+            '{"defs": {"word": "its simple definition", ...}} with one entry per input word.'
+        )
+        user = f"Story context (for sense):\n{(story or '')[:1500]}\n\nWords: {', '.join(seen)}"
+        data = deepseek_chat_json(system=system, user=user,
+                                  temperature=0.2, max_tokens=900, fallback=None)
+        defs = (data or {}).get("defs") if isinstance(data, dict) else None
+        out: dict[str, str] = {}
+        for k, v in (defs or {}).items():
+            kw = str(k or "").strip().lower()
+            dv = str(v or "").strip().rstrip(".")
+            low = dv.lower()
+            if not kw or not dv:
+                continue
+            if low.startswith("meaning of ") or low.startswith("definition of "):
+                continue
+            out[kw] = dv
+        return out
+    except Exception as e:  # noqa: BLE001
+        print(f"[ai_extractor] ai_define_words 失败：{e}")
+        return {}
 
 
 def generate_one_worksheet_question(
