@@ -3134,6 +3134,9 @@ def main() -> None:
 
     if "raw_story_input" not in st.session_state:
         st.session_state.raw_story_input = ""
+    _pending_draft = st.session_state.pop("_pending_story_draft", None)
+    if _pending_draft is not None:
+        st.session_state.raw_story_input = _pending_draft
 
     with st.form("input_form"):
         # === 必填区 ===
@@ -3276,7 +3279,7 @@ def main() -> None:
                 title.strip(), level, theme.strip(),
                 done_note="可在下方微调",
             )
-            st.session_state.raw_story_input = draft
+            st.session_state["_pending_story_draft"] = draft
             st.success("✅ 故事草稿已生成，请在下方微调后点「AI 抽取」。")
             st.rerun()
 
@@ -3292,7 +3295,6 @@ def main() -> None:
                     "AI 生成故事草稿", generate_story_draft,
                     title.strip(), level, theme.strip(),
                 )
-                st.session_state.raw_story_input = story_text
             raw_story = story_text
             st.warning(
                 "⏳ **本次 AI 抽取预计需要 2–3 分钟**，请稍候。"
