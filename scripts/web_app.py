@@ -5450,23 +5450,24 @@ def _zoom_image(path, key: str, caption: str = "") -> None:
 
 
 def _inject_css() -> None:
-    # VIPKID kid palette：L0 绿 + L1 橙（config.BRAND_COLORS SSOT）
-    _kid_green = brand_color_hex("0")
+    # VIPKID kid palette：L1 橙主色 + L0 绿点缀（config.BRAND_COLORS SSOT）
     _kid_orange = brand_color_hex("1")
+    _kid_green = brand_color_hex("0")
     st.markdown(
         """<style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap');
         :root{
-          --brand:__KID_GREEN__; --brand-dark:#4a8538; --brand-tint:#eef7eb;
-          --brand-2:__KID_ORANGE__; --primary-fixed:#b8e0a8;
+          --brand:__KID_ORANGE__; --brand-dark:#c96800; --brand-tint:#fff4e8;
+          --brand-2:__KID_GREEN__; --accent:__KID_GREEN__; --accent-tint:#eef7eb;
+          --primary-fixed:#ffd9a8;
           --ink:#0b1c30; --muted:#3c4a45; --faint:#6c7a75;
           --line:#dce9ff; --line-soft:#eff4ff; --card:#ffffff;
           --bg:#f8f9ff;
           --radius:14px; --radius-lg:20px;
           --shadow-sm:0 1px 2px rgba(11,28,48,.04),0 1px 3px rgba(11,28,48,.05);
           --shadow-md:0 4px 12px rgba(11,28,48,.06),0 2px 4px rgba(11,28,48,.04);
-          --shadow-lg:0 18px 40px -12px rgba(94,159,73,.15);
-          --ring:0 0 0 3px rgba(94,159,73,.16);
+          --shadow-lg:0 18px 40px -12px rgba(241,130,0,.15);
+          --ring:0 0 0 3px rgba(241,130,0,.16);
           --fs-base:15.5px; --fs-sm:13.5px; --fs-lg:17px;
         }
         html, body, [class*="css"]{
@@ -5476,8 +5477,8 @@ def _inject_css() -> None:
         .stApp{ font-size:var(--fs-base); }
         .stApp{
           background:
-            radial-gradient(900px 480px at 88% -8%, rgba(184,224,168,.12), transparent 60%),
-            radial-gradient(820px 460px at -6% 4%, rgba(94,159,73,.05), transparent 55%),
+            radial-gradient(900px 480px at 88% -8%, rgba(255,217,168,.14), transparent 60%),
+            radial-gradient(820px 460px at -6% 4%, rgba(241,130,0,.05), transparent 55%),
             var(--bg);
         }
         .block-container { max-width: 1340px; padding-top: 1.2rem; }
@@ -5496,7 +5497,7 @@ def _inject_css() -> None:
           border-radius:var(--radius-lg) !important;
           padding:10px 16px 6px !important;
           margin-bottom:18px !important;
-          background:linear-gradient(120deg, rgba(255,255,255,.96), rgba(238,247,235,.88)) !important;
+          background:linear-gradient(120deg, rgba(255,255,255,.96), rgba(255,244,232,.88)) !important;
           box-shadow:var(--shadow-md) !important;
         }
         .app-topbar-brand{ display:flex; align-items:center; gap:12px; min-width:0; }
@@ -5526,12 +5527,12 @@ def _inject_css() -> None:
           display:none !important; width:0 !important; min-width:0 !important; margin:0 !important; padding:0 !important;
         }
         .main-nav-wrap [role="radiogroup"] > label:hover{
-          color:var(--brand) !important; background:rgba(94,159,73,.06) !important;
+          color:var(--brand) !important; background:rgba(241,130,0,.08) !important;
         }
         .main-nav-wrap [role="radiogroup"] > label:has(input:checked){
           color:var(--brand) !important;
-          background:linear-gradient(135deg, rgba(94,159,73,.14), rgba(241,130,0,.10)) !important;
-          box-shadow:0 1px 6px rgba(94,159,73,.16), inset 0 0 0 1px rgba(94,159,73,.20) !important;
+          background:linear-gradient(135deg, rgba(241,130,0,.16), rgba(94,159,73,.10)) !important;
+          box-shadow:0 1px 6px rgba(241,130,0,.18), inset 0 0 0 1px rgba(241,130,0,.22) !important;
         }
         .main-nav-wrap [role="radiogroup"] > label > div:last-child,
         .main-nav-wrap [role="radiogroup"] > label p{
@@ -5571,8 +5572,8 @@ def _inject_css() -> None:
           font-weight:600; background:var(--card); transition:all .15s ease;
         }
         [data-testid="stRadio"] [role="radiogroup"][aria-label="交付物导航"] label:has(input:checked){
-          color:var(--brand); background:var(--brand-tint); border-color:rgba(94,159,73,.35);
-          box-shadow:inset 0 0 0 1px rgba(94,159,73,.12);
+          color:var(--brand); background:var(--brand-tint); border-color:rgba(241,130,0,.35);
+          box-shadow:inset 0 0 0 1px rgba(241,130,0,.12);
         }
         [data-testid="stRadio"] [role="radiogroup"][aria-label="交付物导航"] label > div:first-child{ display:none; }
 
@@ -5591,8 +5592,8 @@ def _inject_css() -> None:
         }
         .hero-gradient{
           background:
-            radial-gradient(circle at top right, rgba(184,224,168,.15), transparent),
-            radial-gradient(circle at bottom left, rgba(94,159,73,.05), transparent);
+            radial-gradient(circle at top right, rgba(255,217,168,.18), transparent),
+            radial-gradient(circle at bottom left, rgba(241,130,0,.06), transparent);
         }
         .hero-grid{
           display:grid; grid-template-columns:1.05fr .95fr; gap:28px; align-items:center;
@@ -5627,7 +5628,7 @@ def _inject_css() -> None:
         .hero-visual{ position:relative; }
         .hero-glow{
           position:absolute; top:-40px; right:-40px; width:220px; height:220px;
-          border-radius:50%; background:#b8e0a8; filter:blur(60px); opacity:.2;
+          border-radius:50%; background:#ffd9a8; filter:blur(60px); opacity:.2;
         }
         .hero-glass{
           position:relative; padding:8px; border-radius:14px;
@@ -5718,7 +5719,7 @@ def _inject_css() -> None:
         .hero::before{
           content:""; position:absolute; inset:0; z-index:0; pointer-events:none;
           background:
-            radial-gradient(420px 220px at 90% -40%, rgba(94,159,73,.22), transparent 60%),
+            radial-gradient(420px 220px at 90% -40%, rgba(241,130,0,.22), transparent 60%),
             radial-gradient(360px 200px at 8% 130%, rgba(241,130,0,.18), transparent 60%);
         }
         .hero::after{
@@ -5730,7 +5731,7 @@ def _inject_css() -> None:
         .hero-icon{ flex:0 0 auto; display:flex; }
         .hero-dino{
           width:64px; height:64px; object-fit:contain;
-          filter:drop-shadow(0 6px 14px rgba(94,159,73,.34));
+          filter:drop-shadow(0 6px 14px rgba(241,130,0,.34));
         }
         .hero-text{ flex:1 1 auto; min-width:0; }
         .hero-title{
@@ -5746,7 +5747,7 @@ def _inject_css() -> None:
           background:linear-gradient(135deg,var(--brand),var(--brand-2)); color:#fff;
           font-weight:700; font-size:12px; letter-spacing:.3px;
           padding:6px 14px; border-radius:999px;
-          box-shadow:0 6px 16px rgba(94,159,73,.32); border:1px solid rgba(255,255,255,.35);
+          box-shadow:0 6px 16px rgba(241,130,0,.32); border:1px solid rgba(255,255,255,.35);
         }
 
         /* ---------- 侧边栏（玻璃质感 + 细描边） ---------- */
@@ -5760,7 +5761,7 @@ def _inject_css() -> None:
         }
         .side-brand .side-dino{
           width:42px; height:42px; object-fit:contain;
-          filter:drop-shadow(0 3px 7px rgba(94,159,73,.28));
+          filter:drop-shadow(0 3px 7px rgba(241,130,0,.28));
         }
         .side-brand span{ font-weight:800; color:var(--ink); font-size:16px; line-height:1.15; }
         .side-brand small{ font-weight:600; color:var(--muted); font-size:11px; }
@@ -5776,23 +5777,38 @@ def _inject_css() -> None:
         .stButton > button:hover{ transform:translateY(-1px); box-shadow:var(--shadow-md); }
         .stButton > button:active{ transform:translateY(0); }
         .stButton > button:focus-visible{ box-shadow:var(--ring) !important; }
-        /* primary = 品牌橙渐变实心 */
+        /* primary = 品牌橙渐变实心（含登录表单提交按钮） */
         .stButton > button[kind="primary"],
-        [data-testid="stBaseButton-primary"]{
-          background:linear-gradient(135deg,var(--brand),var(--brand-2)) !important;
-          border:1px solid rgba(94,159,73,.4) !important;
-          color:#fff !important; box-shadow:0 8px 20px -6px rgba(94,159,73,.5);
+        [data-testid="stBaseButton-primary"],
+        .stFormSubmitButton > button,
+        [data-testid="stFormSubmitButton"] > button,
+        [data-testid="stBaseButton-primaryFormSubmit"]{
+          background:linear-gradient(135deg,var(--brand),#F47332) !important;
+          border:1px solid rgba(241,130,0,.45) !important;
+          color:#fff !important; box-shadow:0 8px 20px -6px rgba(241,130,0,.45);
         }
         .stButton > button[kind="primary"]:hover,
-        [data-testid="stBaseButton-primary"]:hover{
+        [data-testid="stBaseButton-primary"]:hover,
+        .stFormSubmitButton > button:hover,
+        [data-testid="stFormSubmitButton"] > button:hover,
+        [data-testid="stBaseButton-primaryFormSubmit"]:hover{
           filter:brightness(1.03);
-          box-shadow:0 12px 26px -6px rgba(94,159,73,.58) !important;
+          box-shadow:0 12px 26px -6px rgba(241,130,0,.52) !important;
         }
         /* secondary = 描边，hover 染橙 */
         .stButton > button[kind="secondary"]:hover,
         [data-testid="stBaseButton-secondary"]:hover{
           color:var(--brand) !important; border-color:var(--brand) !important;
           background:var(--brand-tint) !important;
+        }
+        /* 链接统一橙色（非粉色 primaryColor） */
+        a, a:visited,
+        [data-testid="stMarkdownContainer"] a,
+        [data-testid="stPageLink-NavLink"]{
+          color:var(--brand) !important;
+        }
+        a:hover, [data-testid="stMarkdownContainer"] a:hover{
+          color:var(--brand-dark) !important;
         }
 
         /* ---------- 输入控件（聚焦发光环，更通透） ---------- */
@@ -5851,7 +5867,7 @@ def _inject_css() -> None:
         .wiz-fill{
           position:absolute; left:0; top:0; height:100%; border-radius:7px;
           background:linear-gradient(90deg,var(--brand),var(--brand-2));
-          box-shadow:0 0 12px rgba(94,159,73,.45);
+          box-shadow:0 0 12px rgba(241,130,0,.45);
           transition:width .4s cubic-bezier(.4,0,.2,1);
         }
 
@@ -5871,7 +5887,7 @@ def _inject_css() -> None:
         }
         [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked){
           background:linear-gradient(90deg,var(--brand-tint),rgba(232,250,245,.4));
-          color:var(--brand); border-color:rgba(94,159,73,.28);
+          color:var(--brand); border-color:rgba(241,130,0,.28);
           box-shadow:inset 3px 0 0 var(--brand);
         }
         [data-testid="stSidebar"] [role="radiogroup"] label > div:first-child{ display:none; }
@@ -5881,7 +5897,7 @@ def _inject_css() -> None:
           display:inline-flex; align-items:center; gap:9px;
           padding:7px 15px; border-radius:999px; font-size:13.5px; font-weight:600;
           color:var(--brand-dark); background:var(--brand-tint);
-          border:1px solid rgba(94,159,73,.28); box-shadow:var(--shadow-sm);
+          border:1px solid rgba(241,130,0,.28); box-shadow:var(--shadow-sm);
           margin:4px 0;
         }
         .timer-pill.done{
@@ -5890,7 +5906,7 @@ def _inject_css() -> None:
         .timer-pill b{ font-variant-numeric:tabular-nums; }
         .timer-spin{
           width:13px; height:13px; border-radius:50%;
-          border:2px solid rgba(94,159,73,.3); border-top-color:var(--brand);
+          border:2px solid rgba(241,130,0,.3); border-top-color:var(--brand);
           animation:tmr-spin .7s linear infinite;
         }
         @keyframes tmr-spin{ to{ transform:rotate(360deg); } }
@@ -5939,7 +5955,7 @@ def _inject_css() -> None:
           display:inline-flex; align-items:center; gap:6px;
           padding:5px 12px; border-radius:999px; font-size:12.5px; font-weight:600;
           color:var(--brand-dark); background:var(--brand-tint);
-          border:1px solid rgba(94,159,73,.22); line-height:1;
+          border:1px solid rgba(241,130,0,.22); line-height:1;
           transition:all .14s ease;
         }
         .chip:hover{ box-shadow:var(--shadow-sm); transform:translateY(-1px); }
@@ -5955,7 +5971,7 @@ def _inject_css() -> None:
           display:inline-flex; align-items:center; justify-content:center;
           width:30px; height:30px; border-radius:9px;
           background:linear-gradient(135deg,var(--brand),var(--brand-2)); color:#fff;
-          box-shadow:0 5px 12px -3px rgba(94,159,73,.5); font-size:15px;
+          box-shadow:0 5px 12px -3px rgba(241,130,0,.5); font-size:15px;
         }
         .sec-head .line{ flex:1 1 auto; height:1px; background:linear-gradient(90deg,var(--line),transparent); }
 
@@ -5980,7 +5996,7 @@ def _inject_css() -> None:
         ::-webkit-scrollbar{ width:11px; height:11px; }
         ::-webkit-scrollbar-thumb{ background:#d7dbe3; border-radius:8px; border:3px solid var(--bg); }
         ::-webkit-scrollbar-thumb:hover{ background:#c2c8d2; }
-        ::selection{ background:rgba(94,159,73,.22); }
+        ::selection{ background:rgba(241,130,0,.22); }
         .hero, [data-testid="stVerticalBlockBorderWrapper"]{ animation:rise .42s cubic-bezier(.2,.7,.2,1) both; }
         @keyframes rise{ from{ opacity:0; transform:translateY(8px); } to{ opacity:1; transform:translateY(0); } }
         @media (prefers-reduced-motion: reduce){ *{ animation:none !important; } }
@@ -5999,7 +6015,7 @@ def _inject_css() -> None:
         .stApp::before{
           content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
           background:
-            radial-gradient(1100px 560px at 84% -12%, rgba(94,159,73,.10), transparent 62%),
+            radial-gradient(1100px 560px at 84% -12%, rgba(241,130,0,.10), transparent 62%),
             radial-gradient(900px 520px at -10% 8%, rgba(120,120,255,.07), transparent 58%),
             radial-gradient(700px 700px at 50% 120%, rgba(241,130,0,.06), transparent 60%);
           animation:bgdrift 26s ease-in-out infinite alternate;
@@ -6044,7 +6060,7 @@ def _inject_css() -> None:
         .hero-icon{ position:relative; }
         .hero-icon::after{   /* 环绕光环 */
           content:""; position:absolute; inset:-8px; border-radius:50%;
-          border:1.5px dashed rgba(94,159,73,.35); animation:ring-spin 14s linear infinite;
+          border:1.5px dashed rgba(241,130,0,.35); animation:ring-spin 14s linear infinite;
         }
         @keyframes ring-spin{ to{ transform:rotate(360deg); } }
         .hero-title{
@@ -6136,8 +6152,8 @@ def _inject_css() -> None:
           .hero-dino, .hero-icon::after, .hero-title, .stApp::before{ animation:none !important; }
         }
         </style>"""
-        .replace("__KID_GREEN__", _kid_green)
-        .replace("__KID_ORANGE__", _kid_orange),
+        .replace("__KID_ORANGE__", _kid_orange)
+        .replace("__KID_GREEN__", _kid_green),
         unsafe_allow_html=True,
     )
 
