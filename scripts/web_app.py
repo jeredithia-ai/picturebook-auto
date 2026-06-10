@@ -1691,17 +1691,20 @@ def _render_step7_assemble(step_num: int, wizard: bool = False) -> None:
     with exp:
         st.caption("💡 点击下方按钮，会用 Step 6 锁定的图 + Step 1-5 的数据，一键打包成 ZIP。")
 
-        if not st.session_state.get("image_results"):
-            st.error("⚠️ 还没有生图结果，请回 Step 6 先生图")
-            return
+        has_images = bool(st.session_state.get("image_results"))
+        if not has_images:
+            st.error("⚠️ 还没有生图结果，请回 Step 6 先生图（可先导出 Prompt，见下方）")
+        else:
+            n_locked = sum(1 for r in st.session_state.image_results.values() if r.get("locked"))
+            n_total = len(st.session_state.image_results)
+            st.info(f"📊 当前 {n_locked}/{n_total} 张图已锁定")
 
-        n_locked = sum(1 for r in st.session_state.image_results.values() if r.get("locked"))
-        n_total = len(st.session_state.image_results)
-        st.info(f"📊 当前 {n_locked}/{n_total} 张图已锁定")
+            if st.button("📦 组装 4 件套 + 打包 ZIP", type="primary",
+                         width="stretch", key="s7_assemble"):
+                _run_docs_assembly()
 
-        if st.button("📦 组装 4 件套 + 打包 ZIP", type="primary",
-                     width="stretch", key="s7_assemble"):
-            _run_docs_assembly()
+        st.divider()
+        _render_book_prompt_download_panel(key_prefix="s7_prompt")
 
 
 def _format_page_constraints(pc: dict | None) -> str:
@@ -1907,6 +1910,8 @@ def _render_step_workbench(step_num: int, wizard: bool = False) -> None:
             key="wb_show_prompt_overview",
         ):
             _render_step4_combined(step_num, embed=True)
+
+        _render_book_prompt_download_panel(key_prefix="wb_prompt")
 
         _confirm_next_step(
             step_num,
@@ -3113,6 +3118,8 @@ def main() -> None:
     )
     if mode == "📚 批量生产":
         _render_batch_mode()
+        if st.session_state.get("batch_last_summary"):
+            _render_batch_prompt_downloads(st.session_state["batch_last_summary"])
         return
     if mode == "📤 上传成品绘本 → 教辅":
         _render_upload_mode()
@@ -4845,6 +4852,12 @@ def _run_image_generation_only(mock_images: bool) -> None:
             f"✅ 已生成 {n} 张图到 `{img_dir}`。"
             f"下方按页审核 —— 不满意的可点 🔁 单张重生；满意的勾 ✅ 锁定。"
         )
+    try:
+        paths = _export_book_prompts_to_disk(outline)
+        st.session_state["wb_prompt_paths"] = {k: str(v) for k, v in paths.items()}
+        st.caption("📝 完整 Prompt 已同步落盘，可在下方「完整 Prompt 导出」下载。")
+    except Exception as _pe:  # noqa: BLE001
+        st.caption(f"Prompt 同步落盘跳过：{_pe}")
 
 
 def _regenerate_single_image(page_index: int, mock_images: bool) -> None:
@@ -5211,6 +5224,12 @@ def _run_docs_assembly() -> None:
 
     _elapsed = time.time() - _assemble_t0
     st.success(f"4 件套已生成（组装用时 {_elapsed:.1f}s）。点击下面按钮下载：")
+    try:
+        paths = _export_book_prompts_to_disk(outline)
+        st.session_state["s7_prompt_paths"] = {k: str(v) for k, v in paths.items()}
+        st.caption("📝 完整 Prompt 已同步落盘（image_prompts.txt + SOP 四部分）。")
+    except Exception as _pe:  # noqa: BLE001
+        st.caption(f"Prompt 同步落盘跳过：{_pe}")
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         _download_button(pb_path, "📘 绘本 PPT")
@@ -5222,6 +5241,8 @@ def _run_docs_assembly() -> None:
         _download_button(tg_path, "📖 Teacher Guide")
     with col5:
         _download_button(zip_path, "📦 全套 ZIP", primary=True)
+
+    _render_book_prompt_download_panel(key_prefix="asm_prompt")
 
     # 4 交付物视觉预览（文档→PDF→PNG，按需渲染，带缓存）
     _render_deliverable_previews(pb_path, ws_path, rr_path, tg_path)
@@ -5307,6 +5328,243 @@ def _download_button(path: Path, label: str, *, primary: bool = False) -> None:
             type="primary" if primary else "secondary",
             width="stretch",
         )
+
+
+def _ensure_page_prompts_for_export(outline: BookOutline) -> None:
+    """导出前确保 session 里已有每页 prompt（无则按当前 outline 重建）。"""
+    if st.session_state.get("page_prompts"):
+        return
+    ec = st.session_state.get("extracted")
+    if ec:
+        apply_extracted_to_outline(outline, ec)
+    _rebuild_all_cn_prompts()
+
+
+def _built_pages_for_sop(outline: BookOutline, ip_age: int) -> list:
+    """组装 SOP 导出用的 (page, BuiltPromptCN) 列表；优先用老师在 UI 上改过的正/反向。"""
+    from cn_prompt_builder import BuiltPromptCN
+
+    cast_pool = st.session_state.get("story_cast_pool") or None
+    generic_overrides = st.session_state.get("generic_overrides") or None
+    page_prompts = st.session_state.get("page_prompts") or {}
+    built_pages: list = []
+    for page in outline.pages:
+        edited = page_prompts.get(page.index)
+        base = build_cn_page_prompt(
+            page, outline, ip_age,
+            cast_pool=cast_pool, generic_overrides=generic_overrides,
+        )
+        if edited and (edited.get("positive") or edited.get("prompt")):
+            pos = (edited.get("positive") or edited.get("prompt") or "").strip()
+            neg = (edited.get("negative") or "").strip()
+            built = BuiltPromptCN(
+                positive=pos,
+                negative=neg,
+                prompt=BuiltPromptCN.join(pos, neg),
+                references=base.references,
+                used_characters=base.used_characters,
+                scene_cn=base.scene_cn,
+                story_lock=base.story_lock,
+            )
+        else:
+            built = base
+        built_pages.append((page, built))
+    return built_pages
+
+
+def _write_image_prompts_txt(
+    run_dir: Path, name_prefix: str, outline: BookOutline, ip_age: int,
+) -> Path:
+    """落盘 image_prompts.txt（与 batch_runner 同格式：含 L3-6 全局画风说明 + 每页最终出图 prompt）。"""
+    from config import GPT_CLEAN_STYLE_DIRECTIVE as _STY, GPT_CLEAN_STYLE_ECHO as _ECHO
+
+    jobs: list[tuple[int, str, str]] = []
+    for page in outline.pages:
+        final_prompt, refs = _build_final_prompt_for_page(page, outline, ip_age)
+        refnames = "、".join(Path(r).name for r in (refs or []))
+        jobs.append((page.index, final_prompt, refnames))
+
+    lv_dump = str(outline.level).strip().lower().lstrip("l")
+    is_l36 = lv_dump in ("3", "4", "5", "6")
+    lines = [f"# {name_prefix} 出图提示词（共 {len(jobs)} 页）", ""]
+    if is_l36:
+        lines += [
+            "【全局画风·前缀（每页自动前置）】", _STY.strip(),
+            "", "【全局画风·末尾回声（每页自动后置）】", _ECHO.strip(),
+            "", "=" * 60, "",
+        ]
+    for idx, pp, refnames in sorted(jobs, key=lambda j: j[0]):
+        tag = "封面" if idx == 0 else f"P{idx}"
+        lines += [f"—— {tag} —— 参考图: {refnames or '无'}", pp.strip(), "", "-" * 60, ""]
+    out = run_dir / "image_prompts.txt"
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return out
+
+
+def _export_book_prompts_to_disk(outline: BookOutline | None = None) -> dict[str, Path]:
+    """同步生成并落盘 image_prompts.txt + SOP 四部分 + Prompt ZIP，返回路径 dict。"""
+    outline = outline or st.session_state.outline
+    ec = st.session_state.get("extracted")
+    if not outline or not ec:
+        raise ValueError("需要先完成 AI 抽取")
+    apply_extracted_to_outline(outline, ec)
+    _ensure_page_prompts_for_export(outline)
+    run_dir, _, name_prefix = _ensure_run_dir()
+    ip_age = outline.ip_age or resolve_ip_age(outline.level)
+
+    img_path = _write_image_prompts_txt(run_dir, name_prefix, outline, ip_age)
+    from export_sop_prompts import write_sop_document
+    sop_path = write_sop_document(
+        outline, _built_pages_for_sop(outline, ip_age), run_dir, name_prefix,
+    )
+    zip_path = run_dir / f"{name_prefix}_Prompts.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(img_path, arcname=img_path.name)
+        z.write(sop_path, arcname=sop_path.name)
+    return {"image_prompts": img_path, "sop": sop_path, "zip": zip_path}
+
+
+def _load_existing_prompt_paths(outline: BookOutline) -> dict[str, str]:
+    """若 run_dir 里已有 prompt 文件，读路径供下载（不重算）。"""
+    run_dir_s = st.session_state.get("run_dir")
+    if not run_dir_s:
+        return {}
+    run_dir = Path(run_dir_s)
+    name_prefix = st.session_state.get("run_name_prefix") or _name_prefix(outline)
+    paths: dict[str, str] = {}
+    img_p = run_dir / "image_prompts.txt"
+    sop_p = run_dir / f"{name_prefix}_SOP_Prompts.txt"
+    zip_p = run_dir / f"{name_prefix}_Prompts.zip"
+    if img_p.exists():
+        paths["image_prompts"] = str(img_p)
+    if sop_p.exists():
+        paths["sop"] = str(sop_p)
+    if zip_p.exists():
+        paths["zip"] = str(zip_p)
+    return paths
+
+
+def _render_book_prompt_download_panel(key_prefix: str = "prompt_exp") -> None:
+    """单本：同步生成 / 下载完整 Prompt（image_prompts.txt + SOP 四部分 + ZIP）。"""
+    outline = st.session_state.get("outline")
+    if not outline or not st.session_state.get("extracted"):
+        return
+    sk = f"{key_prefix}_paths"
+    with st.expander("📝 完整 Prompt 导出（image_prompts + SOP 四部分）", expanded=False):
+        st.caption(
+            "同步生成并落盘**实际出图用的整本提示词**（`image_prompts.txt`）与 "
+            "**SOP 对外交付四部分**（`*_SOP_Prompts.txt`）。可单独下载或打包 ZIP。"
+        )
+        if st.button("🔄 同步生成完整 Prompt", key=f"{key_prefix}_gen", type="secondary"):
+            try:
+                paths = run_with_live_timer("生成完整 Prompt 文档", _export_book_prompts_to_disk)
+                st.session_state[sk] = {k: str(v) for k, v in paths.items()}
+                st.success("✅ 已生成并落盘完整 Prompt")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"生成失败：{e}")
+
+        paths = st.session_state.get(sk) or _load_existing_prompt_paths(outline)
+        if not paths:
+            st.info("👆 点「同步生成完整 Prompt」导出当前书的全部提示词（无需先出图）。")
+            return
+
+        c1, c2, c3 = st.columns(3)
+        img_p = Path(paths.get("image_prompts", ""))
+        sop_p = Path(paths.get("sop", ""))
+        zip_p = Path(paths.get("zip", ""))
+        with c1:
+            if img_p.exists():
+                with open(img_p, "rb") as f:
+                    st.download_button(
+                        "⬇️ image_prompts.txt",
+                        f.read(), img_p.name,
+                        key=f"{key_prefix}_dl_img",
+                    )
+        with c2:
+            if sop_p.exists():
+                with open(sop_p, "rb") as f:
+                    st.download_button(
+                        "⬇️ SOP 四部分 Prompt",
+                        f.read(), sop_p.name,
+                        key=f"{key_prefix}_dl_sop",
+                    )
+        with c3:
+            if zip_p.exists():
+                with open(zip_p, "rb") as f:
+                    st.download_button(
+                        "⬇️ Prompt 打包 ZIP",
+                        f.read(), zip_p.name,
+                        key=f"{key_prefix}_dl_zip",
+                        type="primary",
+                    )
+
+
+def _name_prefix_from_batch_outputs(outputs: list[str]) -> str:
+    for o in outputs or []:
+        name = Path(o).name
+        if name.endswith("_Reader.pptx"):
+            return name[: -len("_Reader.pptx")]
+    return ""
+
+
+def _batch_book_prompt_dir(out_root: Path, name_prefix: str) -> Path:
+    sub = out_root / name_prefix
+    return sub if sub.is_dir() else out_root
+
+
+def _render_batch_prompt_downloads(summary: dict) -> None:
+    """批量生产完成后：按本提供 Prompt 文件下载。"""
+    out_root = Path(summary.get("out_root", ""))
+    if not out_root.is_dir():
+        return
+    books = [b for b in summary.get("books", []) if b.get("status") == "ok"]
+    if not books:
+        return
+    with st.expander(f"📝 批量 Prompt 下载（{len(books)} 本）", expanded=False):
+        st.caption(
+            "每本含 `image_prompts.txt`（实际出图提示词）与 SOP 四部分 `*_SOP_Prompts.txt`。"
+            "批量生产时已自动落盘，可直接下载。"
+        )
+        for b in books:
+            name_prefix = _name_prefix_from_batch_outputs(b.get("outputs") or [])
+            if not name_prefix:
+                continue
+            book_dir = _batch_book_prompt_dir(out_root, name_prefix)
+            img_p = book_dir / "image_prompts.txt"
+            sop_p = book_dir / f"{name_prefix}_SOP_Prompts.txt"
+            if not img_p.exists() and not sop_p.exists():
+                continue
+            st.markdown(f"**{name_prefix}**")
+            cols = st.columns(3)
+            with cols[0]:
+                if img_p.exists():
+                    with open(img_p, "rb") as f:
+                        st.download_button(
+                            "⬇️ image_prompts.txt",
+                            f.read(), img_p.name,
+                            key=f"batch_prompt_img_{name_prefix}",
+                        )
+            with cols[1]:
+                if sop_p.exists():
+                    with open(sop_p, "rb") as f:
+                        st.download_button(
+                            "⬇️ SOP 四部分",
+                            f.read(), sop_p.name,
+                            key=f"batch_prompt_sop_{name_prefix}",
+                        )
+            with cols[2]:
+                if img_p.exists() and sop_p.exists():
+                    buf = io.BytesIO()
+                    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                        z.write(img_p, arcname=img_p.name)
+                        z.write(sop_p, arcname=sop_p.name)
+                    st.download_button(
+                        "⬇️ Prompt ZIP",
+                        buf.getvalue(),
+                        f"{name_prefix}_Prompts.zip",
+                        key=f"batch_prompt_zip_{name_prefix}",
+                        type="primary",
+                    )
 
 
 # =============================== 工具 ===============================

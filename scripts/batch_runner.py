@@ -865,3 +865,5 @@ def run_batch_from_ui() -> None:
                                    file_name="ALL_BOOKS.zip", mime="application/zip")
     with st.expander("📋 完整 JSON 日志", expanded=False):
         st.json(summary)
+    st.session_state["batch_last_summary"] = summary
+    return summary
