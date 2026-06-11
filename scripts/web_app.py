@@ -57,7 +57,7 @@ from parser import BookOutline, PageSpec, enrich_from_syllabus
 from ppt_builder import build_picturebook_pptx, safe_filename
 from prompt_builder import build_page_prompt  # legacy: fallback only
 from reading_report_builder import attach_rr_questions, build_reading_report
-from seedream_client import generate_image, generate_image_for_level
+from seedream_client import generate_image, generate_image_for_level, is_placeholder_image
 from teacher_guide_builder import build_teacher_guide
 from worksheet_builder import attach_worksheet_questions, build_worksheet
 from curriculum_display import (
@@ -1760,6 +1760,30 @@ def _render_step6_image_gen(step_num: int, embed: bool = False) -> None:
 # Step 7：📦 组装 4 件套
 # ============================================================================
 
+def _placeholder_pages_in_session() -> list[int]:
+    """返回当前 session 中仍为占位图的页 index 列表。"""
+    out: list[int] = []
+    for idx, entry in (st.session_state.get("image_results") or {}).items():
+        path = entry.get("path")
+        if path and is_placeholder_image(path):
+            out.append(int(idx))
+    return sorted(out)
+
+
+def _image_result_entry(
+    *, path: str, prompt: str, label: str, version: int, locked: bool = False,
+) -> dict:
+    """统一构造 image_results 条目（含占位图标记）。"""
+    return {
+        "path": path,
+        "prompt": prompt,
+        "label": label,
+        "version": version,
+        "locked": locked,
+        "is_placeholder": is_placeholder_image(path),
+    }
+
+
 def _render_step7_assemble(step_num: int, wizard: bool = False) -> None:
     exp = _stage_shell(step_num, "📦 组装 4 件套（PPT / Worksheet / RR / TG）", wizard)
     if exp is None:
@@ -1775,8 +1799,36 @@ def _render_step7_assemble(step_num: int, wizard: bool = False) -> None:
             n_total = len(st.session_state.image_results)
             st.info(f"📊 当前 {n_locked}/{n_total} 张图已锁定")
 
-            if st.button("📦 组装 4 件套 + 打包 ZIP", type="primary",
-                         width="stretch", key="s7_assemble"):
+            ph_pages = _placeholder_pages_in_session()
+            if ph_pages:
+                st.error(
+                    f"⚠️ 仍有 **{len(ph_pages)}** 张占位图（"
+                    f"{', '.join(page_display_name(i) for i in ph_pages)}），"
+                    "请回 Step 6 逐页 🔁 重生后再组装。"
+                )
+
+            st.markdown("#### 教辅人工签字门禁")
+            st.caption("组装前请人工审阅 Reading Report 与 Worksheet 题目/排版。")
+            c_rr, c_ws = st.columns(2)
+            with c_rr:
+                rr_signed = st.checkbox("RR 已人工审阅", key="s7_rr_signed")
+            with c_ws:
+                ws_signed = st.checkbox("Worksheet 已人工审阅", key="s7_ws_signed")
+            st.text_input("签字人（可选）", key="s7_signer_name", placeholder="姓名或工号")
+
+            can_assemble = not ph_pages and rr_signed and ws_signed
+            if has_images and n_locked < n_total:
+                st.warning(f"尚有 {n_total - n_locked} 张图未锁定，建议全部锁定后再组装。")
+            if has_images and (not rr_signed or not ws_signed):
+                st.warning("请勾选 RR / Worksheet 人工审阅后再组装。")
+
+            if st.button(
+                "📦 组装 4 件套 + 打包 ZIP",
+                type="primary",
+                width="stretch",
+                key="s7_assemble",
+                disabled=not can_assemble,
+            ):
                 _run_docs_assembly()
 
         st.divider()
@@ -1998,9 +2050,12 @@ def _render_step_workbench(step_num: int, wizard: bool = False) -> None:
 
 def _render_batch_mode() -> None:
     """📚 批量生产：N 个大纲 → N×4 件套。详细实现见 batch_runner。"""
+    from batch_runner import WEB_BATCH_LIMIT_HINT, WEB_BATCH_MAX
+
     st.subheader("📚 批量生产（输入 N 个大纲 → 每本自动产出 4 件套）")
     st.caption(
-        "每本之间数据严格隔离；绘本图全自动生成（标记『待人工抽查』，可事后回单本模式逐页重生）。"
+        f"每本之间数据严格隔离；绘本图全自动生成（标记『待人工抽查』，可事后回单本模式逐页重生）。"
+        f" **{WEB_BATCH_LIMIT_HINT}**（Web 单次 ≤ {WEB_BATCH_MAX} 本）"
     )
     st.info(
         "粘贴多本大纲，每本用 `===` 分隔。每本第一行 = `Title | Level | Book#`，其后为故事原文。"
@@ -2392,9 +2447,12 @@ def _render_upload_download_row(paths: dict) -> None:
 
 def _render_upload_batch_mode() -> None:
     """批量：N 本已有绘本 → 每本 WS + RR + TG。"""
+    from batch_runner import WEB_BATCH_LIMIT_HINT, WEB_BATCH_MAX, validate_web_batch_limit
+
     st.info(
-        "粘贴多本信息，每本用 `===` 分隔。每本第一行 = `Title | Level | Book#`，其后为故事英文原文。"
-        "再上传 **ZIP（每本子文件夹）** 或 **多个 PDF/PPTX**（按书名模糊匹配，匹配不到则按顺序对应）。"
+        f"粘贴多本信息，每本用 `===` 分隔。每本第一行 = `Title | Level | Book#`，其后为故事英文原文。"
+        f"再上传 **ZIP（每本子文件夹）** 或 **多个 PDF/PPTX**（按书名模糊匹配，匹配不到则按顺序对应）。"
+        f" **{WEB_BATCH_LIMIT_HINT}**（Web 单次 ≤ {WEB_BATCH_MAX} 本）"
     )
     st.text_area(
         "批量书目 + 故事原文",
@@ -2447,6 +2505,10 @@ def _render_upload_batch_mode() -> None:
     items = parse_batch_outlines(st.session_state.get("up_batch_raw", ""))
     if not items:
         st.error("没解析到任何书目。请检查格式：每本第一行 `Title | Level | Book#`，多本用 `===` 分隔。")
+        return
+    limit_err = validate_web_batch_limit(items)
+    if limit_err:
+        st.error(limit_err)
         return
 
     book_map: dict[str, list[_UploadBlob]] = {}
@@ -3543,6 +3605,7 @@ def main() -> None:
     if mode == "📚 批量生产":
         _render_batch_mode()
         if st.session_state.get("batch_last_summary"):
+            render_batch_output_table(st.session_state["batch_last_summary"], expanded=True)
             _render_batch_prompt_downloads(st.session_state["batch_last_summary"])
         return
     if mode == "📤 已有绘本 · 教辅三件套":
@@ -5256,10 +5319,10 @@ def _run_image_generation_only(mock_images: bool) -> None:
                             pass
                         continue
                     prev = image_results.get(page.index, {})
-                    image_results[page.index] = {
-                        "path": str(dest), "prompt": final_prompt, "label": page.label,
-                        "version": version, "locked": prev.get("locked", False),
-                    }
+                    image_results[page.index] = _image_result_entry(
+                        path=str(dest), prompt=final_prompt, label=page.label,
+                        version=version, locked=prev.get("locked", False),
+                    )
                 elapsed = int(time.time() - start_ts)
                 progress.progress(min(done, n) / n, f"已完成 {min(done, n)}/{n}")
                 status.text(
@@ -5309,10 +5372,10 @@ def _run_image_generation_only(mock_images: bool) -> None:
                     pass
                 continue
             prev = image_results.get(page.index, {})
-            image_results[page.index] = {
-                "path": str(dest), "prompt": final_prompt, "label": page.label,
-                "version": version, "locked": prev.get("locked", False),
-            }
+            image_results[page.index] = _image_result_entry(
+                path=str(dest), prompt=final_prompt, label=page.label,
+                version=version, locked=prev.get("locked", False),
+            )
             errors.pop(page_index, None)
 
     st.session_state.image_results = image_results
@@ -5364,15 +5427,15 @@ def _regenerate_single_image(page_index: int, mock_images: bool) -> None:
     except Exception as e:
         st.error(f"{display_name} 重生失败：{e}")
         return
-    image_results[page_index] = {
-        "path": str(dest),
-        "prompt": final_prompt,
-        "label": page.label,
-        "version": version,
-        "locked": False,
-    }
+    image_results[page_index] = _image_result_entry(
+        path=str(dest), prompt=final_prompt, label=page.label,
+        version=version, locked=False,
+    )
     st.session_state.image_results = image_results
-    st.success(f"✅ {display_name} 已重新生成（v{version}）")
+    if image_results[page_index].get("is_placeholder"):
+        st.warning(f"⚠️ {display_name} 仍为占位图，请检查 API Key 或再试 🔁 重生。")
+    else:
+        st.success(f"✅ {display_name} 已重新生成（v{version}）")
 
 
 def _review_fix_single(page_index: int, mock_images: bool) -> None:
@@ -5415,11 +5478,10 @@ def _review_fix_single(page_index: int, mock_images: bool) -> None:
                 _gen(prompt=_fix_prompt(verdict.get("issues") or [], verdict.get("fix") or ""),
                      dest=dest, reference_url=ref_url, mock=False,
                      label=f"{page_display_name(page_index)} 定向修图", deliver_print=False)
-            image_results[page_index] = {
-                "path": str(dest), "prompt": entry.get("prompt", ""),
-                "label": entry.get("label", ""), "version": version,
-                "locked": False,
-            }
+            image_results[page_index] = _image_result_entry(
+                path=str(dest), prompt=entry.get("prompt", ""),
+                label=entry.get("label", ""), version=version, locked=False,
+            )
             st.session_state.image_results = image_results
             verdict["fixed"] = True
         except Exception as e:
@@ -5447,14 +5509,25 @@ def _render_image_review_panel(mock_imgs: bool) -> None:
         entry = image_results[idx]
         page = pages_by_idx.get(idx)
         display_name = page_display_name(idx)
-        lock_emoji = "🔒 已锁定" if entry.get("locked") else ""
-        st.markdown(
-            f"#### {display_name} · {entry.get('label', '')} · v{entry.get('version', 1)}　{lock_emoji}"
+        img_path = entry.get("path")
+        is_ph = bool(
+            entry.get("is_placeholder")
+            or (img_path and is_placeholder_image(img_path))
         )
+        if is_ph and not entry.get("is_placeholder"):
+            entry["is_placeholder"] = True
+            st.session_state.image_results[idx] = entry
+        lock_emoji = "🔒 已锁定" if entry.get("locked") else ""
+        ph_badge = " 🟠 **占位图·须重生**" if is_ph else ""
+        st.markdown(
+            f"#### {display_name} · {entry.get('label', '')} · v{entry.get('version', 1)}　"
+            f"{lock_emoji}{ph_badge}"
+        )
+        if is_ph:
+            st.warning("此页为 mock/失败占位图，请点 🔁 重生后再锁定或组装。")
 
         c_img, c_info = st.columns([3, 2])
         with c_img:
-            img_path = entry.get("path")
             if img_path and Path(img_path).exists():
                 _zoom_image(
                     img_path,
@@ -5488,13 +5561,20 @@ def _render_image_review_panel(mock_imgs: bool) -> None:
             with bcol2:
                 new_lock = st.checkbox(
                     "✅ 锁定",
-                    value=bool(entry.get("locked")),
+                    value=bool(entry.get("locked")) and not is_ph,
                     key=f"lock_chk_{idx}",
-                    help="勾上表示这张图满意，组装时用它",
+                    help="勾上表示这张图满意，组装时用它（占位图不可锁定）",
+                    disabled=is_ph,
                 )
-                if new_lock != bool(entry.get("locked")):
-                    entry["locked"] = new_lock
+                if is_ph and entry.get("locked"):
+                    entry["locked"] = False
                     st.session_state.image_results[idx] = entry
+                elif new_lock != bool(entry.get("locked")):
+                    if new_lock and is_ph:
+                        st.error("占位图不可锁定，请先 🔁 重生。")
+                    else:
+                        entry["locked"] = new_lock
+                        st.session_state.image_results[idx] = entry
 
             # 块3：GPT 审图面板 —— 一键审 + 按需定向修（展示问题 + 一键修图）
             if st.button("🩺 GPT 审图并按需修复", key=f"review_btn_{idx}", width="stretch",
@@ -5628,6 +5708,18 @@ def _render_image_feedback_panel(idx: int, mock_imgs: bool) -> None:
 
 def _run_docs_assembly() -> None:
     """v1.8.3 步骤 C：用 session 里的图组装 4 件套 + 打包 ZIP。"""
+    if not st.session_state.get("s7_rr_signed") or not st.session_state.get("s7_ws_signed"):
+        st.error("请先勾选 RR / Worksheet 人工审阅后再组装。")
+        return
+    ph_pages = _placeholder_pages_in_session()
+    if ph_pages:
+        st.error(
+            "仍有占位图页："
+            + "、".join(page_display_name(i) for i in ph_pages)
+            + "。请回 Step 6 重生后再组装。"
+        )
+        return
+
     _assemble_t0 = time.time()
     ec = st.session_state.extracted
     outline: BookOutline = st.session_state.outline
@@ -5988,6 +6080,64 @@ def _name_prefix_from_batch_outputs(outputs: list[str]) -> str:
 def _batch_book_prompt_dir(out_root: Path, name_prefix: str) -> Path:
     sub = out_root / name_prefix
     return sub if sub.is_dir() else out_root
+
+
+def render_batch_output_table(summary: dict, *, expanded: bool = False) -> None:
+    """批量产出表：书名 / 级别 / 状态 / 体检 / 占位页 / 输出链接。"""
+    books = summary.get("books") or []
+    if not books:
+        return
+    out_root = Path(summary.get("out_root", ""))
+    status_labels = {"ok": "✅ 完成", "partial": "🟡 部分", "failed": "❌ 失败"}
+    eval_icons = {"ok": "🟢", "warn": "🟡", "error": "🔴", "": "—"}
+
+    rows: list[dict] = []
+    for b in books:
+        disp = b.get("display_status") or b.get("status", "")
+        if disp not in status_labels and b.get("status") == "ok":
+            disp = "partial" if b.get("placeholder_count") or b.get("needs_human_review") else "ok"
+        ph_n = int(b.get("placeholder_count") or len(b.get("placeholder_pages") or []))
+        ph_pages = b.get("placeholder_pages") or []
+        rows.append({
+            "书名": b.get("title", ""),
+            "级别": f"L{b.get('level', '')}",
+            "Book#": b.get("book", ""),
+            "状态": status_labels.get(disp, disp),
+            "体检": eval_icons.get(b.get("eval_level", ""), "—"),
+            "占位页数": ph_n,
+            "占位页": ", ".join(f"P{p}" for p in ph_pages) if ph_pages else "—",
+            "用时(s)": b.get("elapsed_s", ""),
+            "输出目录": b.get("name_prefix", ""),
+        })
+
+    with st.expander(f"📊 批量产出表（{len(books)} 本）", expanded=expanded):
+        st.dataframe(rows, width="stretch", hide_index=True)
+        st.caption(f"输出根目录：`{out_root}` · 完整日志：`{summary.get('log_path', '')}`")
+        for b in books:
+            if b.get("status") != "ok":
+                continue
+            name_prefix = b.get("name_prefix") or _name_prefix_from_batch_outputs(b.get("outputs") or [])
+            if not name_prefix:
+                continue
+            book_dir = _batch_book_prompt_dir(out_root, name_prefix) if out_root.is_dir() else Path()
+            zip_path = b.get("zip") or ""
+            cols = st.columns([3, 1, 1])
+            with cols[0]:
+                st.markdown(f"**{b.get('title', name_prefix)}**")
+                if book_dir.is_dir():
+                    st.caption(str(book_dir))
+            with cols[1]:
+                if zip_path and Path(zip_path).exists():
+                    with open(zip_path, "rb") as fh:
+                        st.download_button(
+                            "⬇️ 本套 ZIP",
+                            fh.read(),
+                            Path(zip_path).name,
+                            key=f"batch_out_zip_{name_prefix}",
+                        )
+            with cols[2]:
+                if book_dir.is_dir():
+                    st.caption("📂 见左路径")
 
 
 def _render_batch_prompt_downloads(summary: dict) -> None:

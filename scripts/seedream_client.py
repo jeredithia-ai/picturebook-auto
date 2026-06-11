@@ -1182,7 +1182,40 @@ def generate_image_candidates(
     return results
 
 
-# ---------- 占位图（无 API / mock 时） ----------
+# ---------- 占位图（无 API / mock / 出图失败兜底） ----------
+PLACEHOLDER_MAX_BYTES = 60 * 1024  # 真实页图通常 >100KB；过小视为失败占位
+
+
+def is_placeholder_image(path: Path | str) -> bool:
+    """判定是否为 mock/失败兜底占位图（含 [MOCK] 标记或异常小 PNG）。"""
+    p = Path(path)
+    if not p.is_file() or p.stat().st_size == 0:
+        return True
+    try:
+        raw = p.read_bytes()
+    except OSError:
+        return True
+    if b"[MOCK]" in raw:
+        return True
+    if p.suffix.lower() == ".png" and p.stat().st_size < PLACEHOLDER_MAX_BYTES:
+        return True
+    return False
+
+
+def scan_placeholder_pages(img_dir: Path, pattern: str = "page_*.png") -> list[int]:
+    """扫描目录内分页图，返回占位页 index 列表（page_03.png → 3）。"""
+    found: list[int] = []
+    if not img_dir.is_dir():
+        return found
+    for fp in sorted(img_dir.glob(pattern)):
+        if not is_placeholder_image(fp):
+            continue
+        m = re.match(r"page_(\d+)", fp.stem)
+        if m:
+            found.append(int(m.group(1)))
+    return sorted(found)
+
+
 def _save_mock_image(dest: Path, prompt: str, label: str) -> None:
     w, h = 1536, 1024
     img = Image.new("RGB", (w, h), (244, 240, 232))

@@ -38,6 +38,8 @@ except Exception:  # pragma: no cover
     auto_summary = None  # type: ignore
 
 PER_BOOK_TIMEOUT_S = int(os.getenv("PER_BOOK_TIMEOUT_S", str(45 * 60)))  # 单本超时 45 分钟（生图重试更耐心后放大）
+WEB_BATCH_MAX = 5  # Web 端单次批量上限（CLI 不受此限）
+WEB_BATCH_LIMIT_HINT = "单次最多 5 本，系列备课请分批或联系管理员走 CLI"
 
 # 出图前/后耗时估算（仅用于 Dry-run 预检展示，非精确）
 EST_SECS_PER_IMAGE = 16
@@ -107,11 +109,31 @@ class BatchResult:
     eval_level: str = ""             # ④ evals 体检结论：ok / warn / error（空=未跑）
     eval_msgs: list[str] = field(default_factory=list)  # 红/黄项摘要（定向抽查用）
     skipped_pages: int = 0           # ② 断点续跑：本次复用的已存在页数
+    placeholder_pages: list[int] = field(default_factory=list)  # mock/失败兜底占位页 index
 
 
 # ============================================================
 #  解析批量输入
 # ============================================================
+def validate_web_batch_limit(items: list[BatchItem]) -> str | None:
+    """Web 批量上限校验；超限返回错误文案，否则 None。"""
+    n = len(items)
+    if n > WEB_BATCH_MAX:
+        return (
+            f"本次解析到 **{n} 本**，超过 Web 单次上限 **{WEB_BATCH_MAX} 本**。{WEB_BATCH_LIMIT_HINT}。"
+        )
+    return None
+
+
+def _book_display_status(r: BatchResult) -> str:
+    """批量产出表用：ok / partial / failed。"""
+    if r.status == "failed":
+        return "failed"
+    if r.placeholder_pages or (r.error or "").strip():
+        return "partial"
+    return "ok"
+
+
 def parse_batch_outlines(raw: str) -> list[BatchItem]:
     """解析多本大纲文本。每本用 `===` 分隔；每本第一行 = `Title | Level | Book#`，其后为故事。"""
     items: list[BatchItem] = []
@@ -472,6 +494,21 @@ def run_one(item: BatchItem, out_root: Path, *, mock: bool = False,
             if skipped:
                 res.skipped_pages += 1
 
+    # 占位图检测：mock 或 API 失败兜底页 → 标记 partial + 强制人工抽查
+    try:
+        from seedream_client import scan_placeholder_pages
+        res.placeholder_pages = scan_placeholder_pages(img_dir)
+        if res.placeholder_pages:
+            res.needs_human_review = True
+            if res.eval_level not in ("error",):
+                res.eval_level = res.eval_level or "warn"
+            ph_note = f"占位图页：P{','.join(str(p) for p in res.placeholder_pages)}"
+            res.eval_msgs = [ph_note] + res.eval_msgs
+            res.eval_msgs = res.eval_msgs[:12]
+            print(f"[{item.name_prefix}] [WARN] {ph_note}，需重生占位页", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[{item.name_prefix}] 占位图扫描跳过: {e}")
+
     # ---- 涂色线稿（用户拍板 2026-06-08 / 2026-06-09 扩到 L3）：worksheet 读后页 = 涂色线稿 + 自主造句 ----
     #   单独黑白线稿（不走水彩画风指令），失败则 worksheet 自动用留白画框兜底，绝不阻断出书。
     coloring_path: Optional[Path] = None
@@ -633,11 +670,16 @@ def run_batch(
         "books": [
             {
                 "title": r.item.title, "level": r.item.level, "book": r.item.book_number,
-                "status": r.status, "elapsed_s": round(r.elapsed_s, 1),
+                "name_prefix": r.item.name_prefix,
+                "status": r.status, "display_status": _book_display_status(r),
+                "elapsed_s": round(r.elapsed_s, 1),
                 "outputs": r.outputs, "zip": r.zip_path,
                 "needs_human_review": r.needs_human_review,
                 "eval_level": r.eval_level, "eval_msgs": r.eval_msgs,
-                "skipped_pages": r.skipped_pages, "error": r.error[:500],
+                "skipped_pages": r.skipped_pages,
+                "placeholder_pages": r.placeholder_pages,
+                "placeholder_count": len(r.placeholder_pages),
+                "error": r.error[:500],
             }
             for r in results
         ],
@@ -750,6 +792,10 @@ def preflight_from_ui() -> None:
     if not items:
         st.warning("没解析到任何大纲。请检查格式：每本第一行 `Title | Level | Book#`，多本用 `===` 分隔。")
         return
+    limit_err = validate_web_batch_limit(items)
+    if limit_err:
+        st.error(limit_err)
+        return
     rows = preflight(items)
     total_imgs = sum(r["出图张数"] for r in rows)
     total_secs = sum(EST_SECS_TEXT + r["出图张数"] * EST_SECS_PER_IMAGE for r in rows)
@@ -774,6 +820,10 @@ def run_batch_from_ui() -> None:
     items = parse_batch_outlines(raw)
     if not items:
         st.warning("没解析到任何大纲。请检查格式：每本第一行 `Title | Level | Book#`，多本用 `===` 分隔。")
+        return
+    limit_err = validate_web_batch_limit(items)
+    if limit_err:
+        st.error(limit_err)
         return
 
     concurrency = int(st.session_state.get("batch_concurrency", 2))
@@ -818,13 +868,14 @@ def run_batch_from_ui() -> None:
         key = r.item.name_prefix
         if key in rows:
             eval_icon = {"ok": "🟢", "warn": "🟡", "error": "🔴", "": "—"}.get(r.eval_level, "—")
+            ph = f"占位{len(r.placeholder_pages)}页" if r.placeholder_pages else ""
             rows[key] = {
                 "本": key,
                 "状态": "✅ 完成" if r.status == "ok" else "❌ 失败",
                 "用时": f"{r.elapsed_s:.0f}s",
                 "体检": eval_icon,
                 "抽查": "需抽查" if r.needs_human_review else "可放行",
-                "备注": (r.error[:80] or (f"复用{r.skipped_pages}页" if r.skipped_pages else "")),
+                "备注": ph or (r.error[:80] or (f"复用{r.skipped_pages}页" if r.skipped_pages else "")),
             }
             _render_table()
 
@@ -866,4 +917,9 @@ def run_batch_from_ui() -> None:
     with st.expander("📋 完整 JSON 日志", expanded=False):
         st.json(summary)
     st.session_state["batch_last_summary"] = summary
+    try:
+        from web_app import render_batch_output_table
+        render_batch_output_table(summary, expanded=True)
+    except Exception:
+        pass
     return summary
