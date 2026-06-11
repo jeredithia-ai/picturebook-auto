@@ -3614,48 +3614,105 @@ def main() -> None:
 
     # ---------- Section A：输入表单 ----------
     st.success(
-        f"🎯 **必填 2 项**：① Book Title  ② Level  \n"
-        "   **故事由 AI 根据书名自动生成**（约 30 秒），可在下方文本框人工微调后再抽取  \n"
+        f"🎯 **必填**：① Book Title  ② Level  ③ Book #（推荐）  \n"
+        "   **填好 Level + Book# 后，系统会自动从官方 S&S 大纲拉取 7 页故事**（可编辑）；"
+        "未命中大纲时可用「AI 生成故事草稿」  \n"
         f"   其余（CEFR / 词表 / 语法 / 题目等）在 **AI 抽取** 时自动推断 → 产出 {_KIT_LABEL}"
     )
 
     if "raw_story_input" not in st.session_state:
         st.session_state.raw_story_input = ""
+    if "input_level" not in st.session_state:
+        st.session_state.input_level = LEVEL_OPTIONS[0]
+    if "input_book_number" not in st.session_state:
+        st.session_state.input_book_number = ""
+    if "input_title" not in st.session_state:
+        st.session_state.input_title = ""
+
+    _maybe_autofill_syllabus_story()
     _pending_draft = st.session_state.pop("_pending_story_draft", None)
     if _pending_draft is not None:
         st.session_state.raw_story_input = _pending_draft
 
-    with st.form("input_form"):
-        # === 必填区 ===
-        _sec_head("1", "必填基础信息")
-        _chips(["① Book Title", "② Level", "③ 故事（AI 生成·可改）"], kind="ok")
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            title = st.text_input(
-                "📕 Book Title *",
-                value="",
-                placeholder="例如：What Makes a Good Friend?",
-                help="必填。系统会用它做文件名 / 封面 / 各文档大标题，并生成故事内容。",
-            )
-        with col2:
-            level = st.selectbox(
-                "🎚️ Level *", LEVEL_OPTIONS, index=0,
-                help="必填。Smart / 0-2 = 双行词表，3-6 = 单行词表。决定 CEFR / Reader Type / 题数。",
-            )
+    # === 必填基础信息（表单外：on_change 才能即时拉取大纲）===
+    _sec_head("1", "必填基础信息")
+    _chips(["① Book Title", "② Level", "③ Book #", "④ 故事（大纲/AI·可改）"], kind="ok")
+    col1, col2, col3 = st.columns([3, 1, 1])
+    with col1:
+        st.text_input(
+            "📕 Book Title *",
+            placeholder="例如：What Makes a Good Friend?",
+            help="必填。用于文件名 / 封面 / 各文档大标题；无 Book# 时按书名模糊匹配大纲。",
+            key="input_title",
+            on_change=_on_syllabus_identity_change,
+        )
+    with col2:
+        st.selectbox(
+            "🎚️ Level *", LEVEL_OPTIONS,
+            help="必填。Smart / 0-2 = 双行词表，3-6 = 单行词表。决定 CEFR / Reader Type / 题数。",
+            key="input_level",
+            on_change=_on_syllabus_identity_change,
+        )
+    with col3:
+        st.text_input(
+            "📖 Book #",
+            placeholder="留空则按书名匹配",
+            help="官方书号（如 45）。与 Level 组合可唯一命中大纲；留空则按书名模糊匹配。",
+            key="input_book_number",
+            on_change=_on_syllabus_identity_change,
+        )
 
+    _pull_msg = st.session_state.pop("_syllabus_pull_msg", None)
+    if _pull_msg == "miss":
+        st.warning("⚠️ 未在大纲中找到匹配书目，请核对 Level / Book# / 书名")
+
+    if st.session_state.get("_syllabus_auto_hit"):
+        _meta = st.session_state.get("_syllabus_auto_meta") or {}
+        _lvl_disp = _meta.get("level", "?")
+        _bn_disp = _meta.get("book_number", "") or "—"
+        _banner_col, _refetch_col = st.columns([5, 1])
+        with _banner_col:
+            st.info(
+                "📥 **已从大纲自动填入（可编辑）** — "
+                f"Level {_lvl_disp} · Book {_bn_disp} · {_meta.get('title', '')}"
+            )
+        with _refetch_col:
+            if st.button("重新拉取大纲", key="refetch_syllabus_story"):
+                _maybe_autofill_syllabus_story(force=True)
+                st.session_state["_syllabus_pull_msg"] = (
+                    "miss" if not st.session_state.get("_syllabus_auto_hit") else None
+                )
+                st.rerun()
+    else:
+        if st.button(
+            "📥 从大纲拉取正文",
+            key="pull_syllabus_btn",
+            help="按当前 Level + Book#（优先）或 Level + 书名 从官方大纲拉取 7 页故事",
+        ):
+            _maybe_autofill_syllabus_story(force=True)
+            st.session_state["_syllabus_pull_msg"] = (
+                "success" if st.session_state.get("_syllabus_auto_hit") else "miss"
+            )
+            st.rerun()
+
+    title = (st.session_state.get("input_title", "") or "").strip()
+    level = st.session_state.get("input_level", LEVEL_OPTIONS[0])
+    book_number = (st.session_state.get("input_book_number", "") or "").strip()
+
+    with st.form("input_form"):
         st.markdown(
-            "**📝 故事正文** — AI 根据书名自动生成；你可在此 **微调** 后再抽取"
+            "**📝 故事正文** — 填 Level + Book# 自动拉官方大纲；也可点「AI 生成故事草稿」"
             "（系统均分 7 页 · 封面另算共 8 页）"
         )
         st.caption(
-            "流程：先填书名 + Level → 点「AI 生成故事草稿」→ 改满意了 → 点「AI 抽取」。"
-            "若故事为空直接点抽取，也会自动生成。"
+            "流程：填 Level + Book#（或书名）→ 大纲自动填入 → 可微调 → 点「AI 抽取」。"
+            "未命中大纲且故事为空时，抽取会自动 AI 生成。"
         )
         raw_story = st.text_area(
             "Raw story",
             label_visibility="collapsed",
             height=220,
-            placeholder="填写书名后点下方「AI 生成故事草稿」，或留空在抽取时自动生成…",
+            placeholder="选择 Level + 填写 Book# 后自动填入官方故事；或点下方「AI 生成故事草稿」…",
             key="raw_story_input",
         )
 
@@ -3664,10 +3721,6 @@ def main() -> None:
         with st.expander("⚙️  选填字段（让交付物更精准）", expanded=False):
             col1, col2, col3 = st.columns(3)
             with col1:
-                book_number = st.text_input(
-                    "Book #", value="01",
-                    help="书号，用于文件名 `Level X_BookXX_品类_标题.后缀`",
-                )
                 theme = st.text_input(
                     "Theme",
                     value="",
@@ -3767,6 +3820,7 @@ def main() -> None:
                 done_note="可在下方微调",
             )
             st.session_state["_pending_story_draft"] = draft
+            st.session_state["_syllabus_auto_hit"] = False
             st.success("✅ 故事草稿已生成，请在下方微调后点「AI 抽取」。")
             st.rerun()
 
@@ -6196,6 +6250,100 @@ def _render_batch_prompt_downloads(summary: dict) -> None:
 
 
 # =============================== 工具 ===============================
+def _syllabus_level_digit(level: str) -> str:
+    """Smart = L0；供 syllabus 检索用（syllabus.json 键为 0:: / 3:: …）。"""
+    s = str(level or "").strip().lower()
+    if "smart" in s:
+        return "0"
+    digits = "".join(ch for ch in s if ch.isdigit())
+    return digits[:1] if digits else ""
+
+
+def _syllabus_identity_key() -> str:
+    return "|".join([
+        str(st.session_state.get("input_level", "")),
+        str(st.session_state.get("input_book_number", "")),
+        (st.session_state.get("input_title", "") or "").strip().lower(),
+    ])
+
+
+def _format_syllabus_story(entry) -> str:
+    """把 SyllabusEntry 正文格式化为 7 行（每行一页一句），供 raw_story_input 使用。"""
+    raw = (
+        (getattr(entry, "text_7page", "") or "")
+        or (getattr(entry, "pure_text", "") or "")
+        or (getattr(entry, "reader_text", "") or "")
+    ).strip()
+    if not raw:
+        return ""
+    if re.search(r"(?i)page\s*\d+", raw):
+        parts = re.split(r"Page\s*\d+\s*[:：]?", raw)
+        pages = [re.sub(r"\s+", " ", p).strip() for p in parts if p.strip()]
+        return "\n".join(pages)
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw) if s.strip()]
+    if not sentences:
+        return raw
+    return "\n".join(sentences[:7] if len(sentences) > 7 else sentences)
+
+
+def _lookup_syllabus_entry(level: str, title: str, book_number: str):
+    """按 Book# 优先、书名模糊次之，从官方 syllabus 取条目。"""
+    try:
+        from syllabus import get_by_number, match
+    except Exception:
+        return None
+    lvl = _syllabus_level_digit(level)
+    if not lvl:
+        return None
+    entry = None
+    bn = (book_number or "").strip()
+    if bn:
+        entry = get_by_number(lvl, bn)
+    if entry is None and (title or "").strip():
+        entry = match(level, title.strip()) or match(lvl, title.strip())
+    return entry
+
+
+def _maybe_autofill_syllabus_story(*, force: bool = False) -> None:
+    """Level / Book# / Title 变化时，把官方大纲正文写入 _pending_story_draft。"""
+    level = st.session_state.get("input_level", "")
+    title = (st.session_state.get("input_title", "") or "").strip()
+    book_number = (st.session_state.get("input_book_number", "") or "").strip()
+    key = _syllabus_identity_key()
+    if not force and key == st.session_state.get("_syllabus_auto_key"):
+        return
+    if not _syllabus_level_digit(level):
+        st.session_state["_syllabus_auto_hit"] = False
+        st.session_state["_syllabus_auto_key"] = key
+        return
+    if not book_number and not title:
+        return
+    entry = _lookup_syllabus_entry(level, title, book_number)
+    if entry is None:
+        st.session_state["_syllabus_auto_hit"] = False
+        st.session_state["_syllabus_auto_key"] = key
+        return
+    story = _format_syllabus_story(entry)
+    if not story:
+        st.session_state["_syllabus_auto_hit"] = False
+        st.session_state["_syllabus_auto_key"] = key
+        return
+    if not title and entry.title:
+        st.session_state["input_title"] = entry.title
+    st.session_state["_pending_story_draft"] = story
+    st.session_state["_syllabus_auto_hit"] = True
+    st.session_state["_syllabus_auto_key"] = key
+    st.session_state["_syllabus_auto_meta"] = {
+        "title": entry.title,
+        "book_number": entry.book_number,
+        "level": entry.level,
+    }
+
+
+def _on_syllabus_identity_change() -> None:
+    _maybe_autofill_syllabus_story(force=False)
+
+
 def _sync_ec_from_syllabus(ec, outline) -> None:
     """命中大纲时，把官方【词表 / 拼读 / 语法】逐字同步进 ec（工作台单一真值源）。
 
