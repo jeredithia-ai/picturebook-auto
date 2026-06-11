@@ -2976,18 +2976,20 @@ def _init_main_nav() -> None:
     tab = _LEGACY_NAV.get(tab, tab)
     if tab in _MAIN_NAV:
         st.session_state["main_nav"] = tab
+        # URL 直达时同步 radio；勿每轮用 main_nav 覆写 widget 状态（会吞掉点击）
+        st.session_state["main_nav_radio"] = _MAIN_NAV[tab]
     elif "main_nav" not in st.session_state:
         st.session_state["main_nav"] = "overview"
-    nav_key = st.session_state.get("main_nav", "overview")
-    if nav_key in _MAIN_NAV:
-        st.session_state["main_nav_radio"] = _MAIN_NAV[nav_key]
 
 
 def _set_main_nav(key: str) -> None:
-    """Set nav target only — never assign main_nav_radio after widgets render."""
+    """Set nav target; sync radio only when it still shows the old tab."""
     if key not in _MAIN_NAV:
         return
     st.session_state["main_nav"] = key
+    label = _MAIN_NAV[key]
+    if st.session_state.get("main_nav_radio") != label:
+        st.session_state["main_nav_radio"] = label
     st.query_params["tab"] = key
     _persist_storage(_NAV_COOKIE, key)
 
@@ -6112,7 +6114,14 @@ def _inject_css() -> None:
           gap:2px; padding:4px; border-radius:999px;
           background:rgba(18,24,38,.04); border:1px solid var(--line);
         }
-        .main-nav-wrap input[type="radio"]{ position:absolute !important; opacity:0 !important; width:0 !important; height:0 !important; pointer-events:none !important; }
+        .main-nav-wrap input[type="radio"],
+        [data-testid="stRadio"] [role="radiogroup"][aria-label="主导航"] input[type="radio"]{
+          position:absolute !important; opacity:0 !important; width:1px !important; height:1px !important;
+        }
+        .main-nav-wrap [role="radiogroup"] > label,
+        [data-testid="stRadio"] [role="radiogroup"][aria-label="主导航"] > label{
+          position:relative !important; z-index:1 !important; pointer-events:auto !important;
+        }
         .main-nav-wrap [role="radiogroup"] > label{
           margin:0 !important; padding:6px 12px !important; border-radius:999px !important;
           border:none !important; background:transparent !important; box-shadow:none !important;
